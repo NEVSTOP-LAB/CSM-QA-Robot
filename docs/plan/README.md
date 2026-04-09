@@ -10,9 +10,9 @@
 
 | # | 来源 | 风险等级 | 问题 | 本计划应对 |
 |---|------|---------|------|-----------|
-| 1 | codex + claude | 🔴 高 | Cookie 无法写评论，必须 OAuth | P0 优先实现 pending/ 人工审核模式；OAuth 作为后续阶段 |
+| 1 | codex + claude | 🟡 中（已更新）| Cookie 写评论是否需要 OAuth — **待实测验证**（[zhihu-cli](https://github.com/BAIGUANGMEI/zhihu-cli) 使用 Cookie+CSRF 实现写操作，但尚未实现发布评论） | AI-001 实测 Cookie+CSRF 方案；成功则直接用，无需 OAuth；失败则回退 pending/ |
 | 2 | codex | 🟡 中 | BGE 模型每次拉取 ~400MB 易超时 | P1 加 HuggingFace Cache + 线上 embedding 兜底开关 |
-| 3 | codex | 🟡 中 | 向量库全量 commit 长期膨胀 | P1 改存 Actions Cache；仓库只保留 hash/metadata |
+| 3 | codex | 🟡 中 | 向量库全量 commit 长期膨胀；Actions Cache 在更换 runner 后会 cache miss，需要自动重建 | P1 改存 Actions Cache（runner 变更时自动重建，无需手动干预）；仓库只保留 hash/metadata |
 | 4 | codex + claude | 🟡 中 | 评论暴增时缺少每日限额与费用告警 | P1 加每日总量上限 + LLM 预算阈值告警 |
 | 5 | codex + claude | 🟡 中 | 发布失败/401/403/429 告警路径不明确 | P1 GitHub Issue 自动告警 |
 | 6 | claude | 🟡 中 | Cookie 失效无感知 | P1 每次运行后记录 Cookie 状态；401/403 立即告警 |
@@ -56,9 +56,9 @@ flowchart TD
     K --> L
     L --> M[组装 Prompt\nSystem: 角色+规则+Wiki\nHistory: 历史轮次\nUser: 当前评论]
     M --> N[调用 DeepSeek-V3 API\nmax_tokens=250]
-    N --> O{OAuth Token\n是否可用?}
-    O -- 否 --> P[写入 pending/\n等待人工确认]
-    O -- 是 --> Q[调用知乎 API\nPOST /comments\n发布回复]
+    N --> O{Cookie+CSRF\n评论发布是否可用?}
+    O -- 否（验证失败或降级） --> P[写入 pending/\n等待人工确认]
+    O -- 是 --> Q[调用知乎 API\nPOST /comments\nCookie + _xsrf CSRF]
     Q --> QERR{发布结果}
     QERR -- 失败 --> P
     QERR -- 成功 --> R
@@ -77,7 +77,7 @@ flowchart TD
 ```mermaid
 flowchart LR
     subgraph P0["阶段零：验证与脚手架（P0 · 必须先完成）"]
-        A0[手动验证知乎 API v4\n读写接口可用性]
+        A0[手动验证知乎 API v4\n读写接口可用性\n重点：Cookie+CSRF 能否 POST /comments]
         A1[初始化 Python 项目\n目录结构 + requirements.txt]
         A2[实现知乎 API v4 读取\ncookie 认证 + 分页]
         A3[实现增量检测\nseen_ids.json 比对]
@@ -86,11 +86,12 @@ flowchart LR
     end
     subgraph P1["阶段一：MVP（pending/ 人工审核）"]
         B1[CSM Wiki 文档分块\nbge 本地 Embedding + 缓存]
-        B2[ChromaDB → Actions Cache\n增量更新机制]
+        B2[ChromaDB → Actions Cache\n增量更新机制\nrunner 变更时自动重建]
         B3[DeepSeek API 接入\n回复生成]
         B4[对话 thread 管理\n追问上下文构建]
         B5[主流程 + pending/ 写入\n前置过滤 + 每日限额]
-        B1 --> B2 --> B3 --> B4 --> B5
+        B6[Cookie+CSRF 评论发布\n验证通过后接入]
+        B1 --> B2 --> B3 --> B4 --> B5 --> B6
     end
     subgraph P2["阶段二：运维完善"]
         C1[失败告警\nGitHub Issue 401/403/429]
@@ -99,12 +100,7 @@ flowchart LR
         C4[费用监控\ntoken 计数 + 预算告警]
         C1 & C2 & C3 & C4
     end
-    subgraph P3["阶段三：自动发布（可选）"]
-        D1[知乎 OAuth 申请\n待审核]
-        D2[OAuth 接入\nPOST /comments 自动发布]
-        D1 --> D2
-    end
-    P0 --> P1 --> P2 --> P3
+    P0 --> P1 --> P2
 ```
 
 ---
@@ -223,13 +219,14 @@ alerting:
 
 #### AI-001：手动验证知乎 API v4 可用性
 
-- **目标**：在正式开发前确认知乎 API 读写接口的当前可用状态
+- **目标**：在正式开发前确认知乎 API 读写接口的当前可用状态；特别验证 Cookie+CSRF 是否足以发布评论（无需 OAuth）
+- **背景**：[zhihu-cli](https://github.com/BAIGUANGMEI/zhihu-cli) 已验证 Cookie+`_xsrf` CSRF token 可用于发布提问/想法/文章等写操作（无需 OAuth），但"发布评论"列在其"后续开发"清单（尚未实现）。需实测评论接口。
 - **任务**：
   1. 用 curl/Postman 测试 `GET /api/v4/articles/{id}/comments`，记录响应格式
-  2. 用 curl 测试 `POST /api/v4/articles/{id}/comments`，确认是否需要 OAuth（预期 401/403）
-  3. 确认 OAuth 申请渠道（知乎开放平台）及审核周期
-  4. 将测试结果更新至 `docs/调研/01-知乎数据获取.md`
-- **验收**：文档中有实测的请求/响应示例，明确写操作是否可用及 OAuth 状态
+  2. **关键测试**：用 Cookie + `x-xsrftoken: <_xsrf值>` 请求头，测试 `POST /api/v4/articles/{id}/comments`，观察是否成功（若返回 200/201 表示 Cookie+CSRF 足够，无需 OAuth）
+  3. 若上述失败（401/403 with error reason = oauth_required），记录错误信息，评估 OAuth 申请路径
+  4. 将实测结果更新至 `docs/调研/01-知乎数据获取.md`，包括成功/失败的请求响应示例
+- **验收**：文档中有实测的请求/响应示例；明确"Cookie+CSRF 可行"或"需要 OAuth"的结论
 - **测试**：无（手动验证步骤）
 
 ---
@@ -248,23 +245,31 @@ alerting:
 
 ---
 
-#### AI-003：ZhihuClient — 读取接口
+#### AI-003：ZhihuClient — 读取与写入接口
 
-- **目标**：实现知乎评论读取，含认证、分页、限流
+- **目标**：实现知乎评论读取与发布，含认证、分页、CSRF、限流
 - **任务**：实现 `scripts/zhihu_client.py`
   1. `ZhihuClient(cookie)` 从 `ZHIHU_COOKIE` 环境变量读取
   2. `get_article_comments(article_id, since_id=None) -> list[Comment]`
      - 自动分页直到 `is_end=True`
      - 随机延迟 1~2 秒
      - 429 指数退避最多 3 次
-  3. `dataclass Comment`：`id, parent_id, content, author, created_time, is_author_reply`
-  4. Cookie 失效（401/403）时抛出 `ZhihuAuthError`
+  3. `post_comment(object_id, object_type, content, parent_id=None) -> bool`
+     - 从 Cookie 中提取 `_xsrf` 值，设置 `x-xsrftoken` 请求头（参考 [zhihu-cli](https://github.com/BAIGUANGMEI/zhihu-cli) 的 CSRF 处理方式）
+     - **若 AI-001 验证 Cookie+CSRF 可用**：直接发送 POST 请求
+     - **若 AI-001 验证需要 OAuth**：记录日志并返回 False（由主流程写入 pending/）
+     - 同样适用 User-Agent、Referer 请求头（与 zhihu-cli 保持一致的浏览器指纹）
+  4. `dataclass Comment`：`id, parent_id, content, author, created_time, is_author_reply`
+  5. Cookie 失效（401/403）时抛出 `ZhihuAuthError`
 - **验收**：单元测试全部通过
 - **测试**：`tests/test_zhihu_client.py`
   - Mock HTTP：正常分页返回、`is_end=True` 停止分页
   - Mock HTTP 429：验证指数退避重试逻辑
   - Mock HTTP 401：验证抛出 `ZhihuAuthError`
   - 验证 `Comment` dataclass 字段映射正确
+  - 验证 `post_comment` 请求头包含 `x-xsrftoken`（从 Cookie 提取）
+  - Mock POST 成功（200/201）：验证返回 True
+  - Mock POST 失败（401）：验证返回 False 并记录日志
 
 ---
 
@@ -402,13 +407,17 @@ alerting:
 #### AI-011：向量库外部化 — Actions Cache 方案
 
 - **目标**：将 vector_store/ 和 reply_index/ 从 git 移到 Actions Cache，防止仓库膨胀
+- **运行环境说明**：
+  - Actions Cache 完全无需 GUI，所有操作为纯文件 I/O，天然支持 headless 运行
+  - **更换 runner 的影响**：Actions Cache 以 `runner.os + key` 为维度存储；更换 runner 类型（如从 `ubuntu-latest` 换到 self-hosted）会导致 cache miss，但 `sync_wiki()` 会自动从源文件重建索引（无需人工干预，约需 2-5 分钟）
+  - 若需要跨 runner 类型共享缓存，可将 key 中的 OS 部分移除（但不推荐，可能导致跨平台二进制不兼容）
 - **任务**：
   1. 更新 `.gitignore`，排除 `data/vector_store/` 和 `data/reply_index/`
   2. 在 `bot.yml` 中添加 `actions/cache` 步骤，key 基于日期（每日更新）
-  3. `RAGRetriever.sync_wiki()` 在 cache miss 时自动重建索引
+  3. `RAGRetriever.sync_wiki()` 在 cache miss 时自动重建索引（重建完成后由 workflow 写回缓存）
   4. 添加每月重建任务（workflow_dispatch 手动触发 or schedule）
   5. 大小上限检查：超过 `max_size_mb`（500MB）时触发告警
-- **验收**：PR 不含 vector_store/ 二进制文件；Actions Cache 命中时跳过重建
+- **验收**：PR 不含 vector_store/ 二进制文件；Actions Cache 命中时跳过重建；runner 变更后下次运行自动重建
 - **测试**：`tests/test_vector_store_cache.py`
   - 验证 cache miss 时调用重建逻辑
   - 验证大小超限时触发告警
@@ -446,25 +455,27 @@ alerting:
 
 ---
 
-### P3 · 阶段三：自动发布（可选，待 OAuth 审批）
+### P1 扩展 · 自动发布（Cookie+CSRF 验证通过后）
 
 ---
 
-#### AI-014：ZhihuClient — OAuth 写操作接入
+#### AI-014：ZhihuClient — Cookie+CSRF 评论发布接入
 
-- **目标**：在获得知乎 OAuth 授权后，实现评论自动发布
-- **前提**：AI-001 确认 OAuth 申请通过，access_token 已配置为 secret
+- **目标**：基于 AI-001 验证结果，实现评论自动发布（Cookie+CSRF 方案，参考 [zhihu-cli](https://github.com/BAIGUANGMEI/zhihu-cli) 的 CSRF 处理架构）
+- **前提**：AI-001 确认 `POST /api/v4/comments` 使用 Cookie+`_xsrf` CSRF token 可成功
 - **任务**：
-  1. `ZhihuClient.post_comment(object_id, object_type, content, parent_id=None) -> bool`
-     - 使用 `ZHIHU_OAUTH_TOKEN` 环境变量
+  1. 完善 `ZhihuClient.post_comment()`（在 AI-003 基础上）
+     - 从 Cookie 字符串解析 `_xsrf` 值，设置 `x-xsrftoken` 请求头
+     - 设置与 zhihu-cli 相同的浏览器指纹（UA + `sec-ch-ua` + `sec-ch-ua-platform`）
      - 发布失败时写入 pending/ 并返回 False
-  2. 刷新 token 逻辑（access_token 过期时用 refresh_token 获取新 token）
-  3. 更新 `settings.yaml` 中 `manual_mode: false` 为默认值
+  2. 在 `settings.yaml` 中将 `manual_mode` 默认值改为 `false`（Cookie+CSRF 就绪后）
+  3. 若 AI-001 证实确实需要 OAuth：保留 `manual_mode: true` 作为默认值，AI-014 改为 OAuth 接入任务（使用 `ZHIHU_OAUTH_TOKEN` 环境变量）
 - **验收**：单元测试全部通过；集成测试（沙盒文章）可实际发布评论
 - **测试**：`tests/test_zhihu_post.py`
+  - 验证 `_xsrf` 从 Cookie 字符串中正确提取并设置到 `x-xsrftoken` 头
   - Mock HTTP POST 成功：验证返回 True
   - Mock HTTP POST 失败：验证写入 pending/ 并返回 False
-  - Mock token 过期（401）：验证触发 token 刷新
+  - Mock 401（Cookie 失效）：验证触发 `ZhihuAuthError`
 
 ---
 
@@ -502,7 +513,7 @@ alerting:
 
 ---
 
-### Prompt AI-003：ZhihuClient 读取接口
+### Prompt AI-003：ZhihuClient 读写接口
 
 ```
 实现 scripts/zhihu_client.py，要求：
@@ -512,14 +523,22 @@ alerting:
    - 调用 GET https://www.zhihu.com/api/v4/articles/{id}/comments?limit=20&offset=0
    - 自动分页直到 is_end=True；请求间随机延迟 1~2 秒
    - 429 指数退避重试最多3次
-3. dataclass Comment 字段：id, parent_id, content, author, created_time, is_author_reply
-4. Cookie 失效（401/403）时抛出 ZhihuAuthError
+   - User-Agent 和 Referer 请求头（参考 zhihu-cli 的浏览器指纹）
+3. 方法 post_comment(object_id, object_type, content, parent_id=None) -> bool
+   - 从 Cookie 字符串中提取 _xsrf 值，设置 x-xsrftoken 请求头
+   - 参考 zhihu-cli (https://github.com/BAIGUANGMEI/zhihu-cli) 的 CSRF 处理方式
+   - 发布失败时记录日志并返回 False（主流程处理写入 pending/）
+4. dataclass Comment 字段：id, parent_id, content, author, created_time, is_author_reply
+5. Cookie 失效（401/403）时抛出 ZhihuAuthError
 
 同步编写 tests/test_zhihu_client.py，覆盖：
 - 正常分页、is_end=True 停止
 - 429 重试逻辑
 - 401 抛出 ZhihuAuthError
 - Comment 字段映射
+- post_comment 请求头包含从 Cookie 提取的 x-xsrftoken
+- Mock POST 成功：返回 True
+- Mock POST 失败（401）：返回 False，不抛出异常
 ```
 
 ---
@@ -636,9 +655,9 @@ alerting:
 
 | Action Item | 功能 | 验收条件 |
 |-------------|------|----------|
-| AI-001 | 知乎 API 验证 | 文档有实测请求/响应示例，写操作可用性明确 |
+| AI-001 | 知乎 API 验证 | 文档有实测请求/响应示例；Cookie+CSRF 可行性结论明确（可用或需 OAuth） |
 | AI-002 | 项目脚手架 | `pytest tests/` 可执行，配置文件加载测试通过 |
-| AI-003 | 评论检测 | 新评论在下次 Action 触发后被检测到；单元测试通过 |
+| AI-003 | 评论读取与发布 | 新评论在下次 Action 触发后被检测到；`post_comment` 正确附加 CSRF 头；单元测试通过 |
 | AI-004 | Actions Workflow | 手动触发成功；HuggingFace 缓存命中后跳过下载 |
 | AI-005 | CSM Wiki RAG | 回复中引用相关 Wiki 内容；增量更新仅处理变更文件 |
 | AI-006 | LLM 回复生成 | 回复质量符合规范；Prompt Cache 命中率 > 50% |
@@ -646,8 +665,8 @@ alerting:
 | AI-008 | 边界过滤 | 广告/超长/重复评论被正确过滤；单元测试通过 |
 | AI-009 | MVP pending/ | 每条评论生成对应 pending/ 文件；集成测试通过 |
 | AI-010 | 失败告警 | Cookie 失效时自动创建 GitHub Issue；幂等不刷 issue |
-| AI-011 | 向量库外部化 | PR 不含二进制向量文件；仓库大小不随时间膨胀 |
+| AI-011 | 向量库外部化 | PR 不含二进制向量文件；runner 变更后自动重建（headless，无需人工干预） |
 | AI-012 | 费用监控 | 月度 LLM 费用 < $1（基准 300 条/月）；超预算时告警 |
 | AI-013 | 真人回复索引 | 真人回复后，类似问题优先参考真人风格 |
-| AI-014 | OAuth 自动发布 | OAuth 就绪后可切换 manual_mode=false 实现自动发布 |
+| AI-014 | Cookie+CSRF 自动发布 | AI-001 通过后接入；可实际发布评论；失败时回退 pending/ |
 
