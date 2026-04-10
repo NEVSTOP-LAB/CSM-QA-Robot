@@ -39,7 +39,7 @@
 
 ---
 
-#### FIX-03：Workflow cron 每 15 分钟触发，与计划 6 小时不符
+#### ~~FIX-03：Workflow cron 每 15 分钟触发，与计划 6 小时不符~~ ✅ 已确认为预期行为，无需修改
 
 | 字段 | 内容 |
 |------|------|
@@ -47,7 +47,7 @@
 | **原文位置** | `claude-2026-04-10.md` § 3.1 问题 18 |
 | **涉及代码** | `.github/workflows/bot.yml`（cron 表达式） |
 | **原始描述** | `*/15 * * * *` 每 15 分钟触发，与 `plan/README.md` 和 AI-004 验收条件中 `cron '0 2,8,14,20 * * *'`（每 6 小时）不符；每天消耗约 192 分钟 Actions 额度，可能加速 Cookie 失效 |
-| **修改方向** | 将 `bot.yml` cron 表达式改为 `0 2,8,14,20 * * *`，并更新注释；同步更新 `plan/README.md` AI-004 验收条件以保持一致 |
+| **结论** | **15 分钟触发频率为项目预期设计**，不是 bug。需将 `plan/README.md` 中的 cron 示例（`0 2,8,14,20 * * *`）更新为实际使用的 `*/15 * * * *`，使文档与实现保持一致（见 DOC-03） |
 
 ---
 
@@ -305,7 +305,7 @@
 |----|--------|----------|----------|
 | DOC-01 | claude | `plan/README.md` § 一（流程图） | 流程图节点 "Cookie+CSRF 评论发布是否可用？" 已被 AI 风险评估替代，流程图未更新 |
 | DOC-02 | claude | `plan/README.md` § 四（settings.yaml 示例） | 示例保留了 `review.manual_mode` 字段，实际代码已删除 |
-| DOC-03 | claude | `plan/README.md` AI-004 验收条件 | cron 表达式与实际 `bot.yml` 不一致（计划 6h vs 实现 15min）→ 随 FIX-03 一并修正 |
+| DOC-03 | claude | `plan/README.md` AI-004 验收条件 | cron 表达式 `0 2,8,14,20 * * *`（每 6 小时）与实际 `bot.yml` 中 `*/15 * * * *`（每 15 分钟）不一致；**15 分钟为项目预期设计**，需将文档更新为 `*/15 * * * *` |
 | DOC-04 | claude | `plan/README.md` AI-011 | cache key 策略与实际实现不一致 → 随 FIX-08 一并修正 |
 | DOC-05 | claude | `docs/实施记录/AI-009-主流程.md` | 函数名 `write_pending_reply()` 与实际 `_write_pending()` 不符 |
 | DOC-06 | claude | `docs/实施记录/AI-009-主流程.md` | 测试项数（8 项）已过时 |
@@ -328,7 +328,6 @@
 第一批（正确性影响，优先修复）：
   FIX-01  question 类型读写
   FIX-02  RAG 按评论内容检索
-  FIX-03  cron 频率调整
   FIX-06  Bot 回复索引时序
 
 第二批（准确性/稳定性）：
@@ -344,6 +343,6 @@
 
 第三批（代码质量/文档）：
   FIX-13 ~ FIX-21
-  DOC-01 ~ DOC-07
+  DOC-01 ~ DOC-07（含 DOC-03：更新 plan/README.md 中的 cron 示例为 `*/15 * * * *`）
   TEST-01 ~ TEST-02
 ```
