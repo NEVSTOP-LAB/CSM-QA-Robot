@@ -286,7 +286,7 @@ class RAGRetriever:
 
             # 跳过未变更的文件
             if not force and old_hashes.get(rel_path) == new_hash:
-                # 保留旧哈希供 _save_wiki_hashes 使用
+                # 文件未变更：new_hash 与旧 hash 相同，写入 new_hashes 供最终保存
                 new_hashes[rel_path] = new_hash
                 skipped_count += 1
                 continue

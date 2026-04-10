@@ -103,7 +103,7 @@ class AlertManager:
                     if 'rel="next"' in part:
                         next_url = part.split(";")[0].strip().strip("<>")
                         break
-                # 翻页时 URL 已含分页参数，清空 params 避免重复
+                # next_url 已包含所有分页参数，置空 params 避免与 URL 内参数冲突
                 url = next_url
                 params = {}
         except Exception as e:
