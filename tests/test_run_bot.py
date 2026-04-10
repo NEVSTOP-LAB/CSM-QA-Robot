@@ -1024,6 +1024,15 @@ class TestArticleSummary:
         runner.load_config()
         runner.init_modules()
 
+        # 文章有 content 时应调用 summarize_article（FIX-05）
+        runner.articles = [{
+            "id": "99999",
+            "title": "测试文章",
+            "url": "https://example.com",
+            "type": "article",
+            "content": "这是文章正文内容，介绍 CSM 方法论。",
+        }]
+
         runner.zhihu_client = MagicMock()
         runner.zhihu_client.get_comments.return_value = [
             _make_comment("sum_1", "问题"),
@@ -1062,3 +1071,40 @@ class TestArticleSummary:
                 assert meta["summary"] == "LLM 生成的摘要"
                 found_summary = True
         assert found_summary, "至少一次 get_or_create_thread 调用应包含 summary"
+
+    def test_no_content_uses_title_as_summary(self, runner, bot_root):
+        """无正文时应直接用 title 作为摘要，不调用 LLM（FIX-05）"""
+        runner.load_config()
+        runner.init_modules()
+
+        # 文章无 content 字段（通常 articles.yaml 只有 title）
+        runner.articles = [{
+            "id": "99999",
+            "title": "CSM 入门指南",
+            "url": "https://example.com",
+            "type": "article",
+            # 无 content 字段
+        }]
+
+        runner.zhihu_client = MagicMock()
+        runner.zhihu_client.get_comments.return_value = [
+            _make_comment("s1", "问题"),
+        ]
+        runner.zhihu_client.post_comment.return_value = True
+
+        runner.llm_client = MagicMock()
+        runner.llm_client.generate_reply.return_value = ("回复", 50)
+        runner.llm_client.assess_risk.return_value = ("safe", "安全")
+        runner.llm_client.total_cost_usd = 0.0
+        runner.llm_client.total_prompt_tokens = 0
+        runner.llm_client.total_completion_tokens = 0
+        runner.llm_client.total_cache_hit_tokens = 0
+        runner.llm_client.model = "deepseek-chat"
+
+        runner.rag_retriever = MagicMock()
+        runner.rag_retriever.retrieve.return_value = []
+
+        runner.process_article(runner.articles[0])
+
+        # 无正文时不应调用 summarize_article（直接用 title）
+        runner.llm_client.summarize_article.assert_not_called()

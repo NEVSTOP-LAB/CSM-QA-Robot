@@ -305,10 +305,16 @@ class BotRunner:
         article_summary = ""
         if self.llm_client:
             try:
-                article_summary = self.llm_client.summarize_article(
-                    title=article.get("title", ""),
-                    content=article.get("title", ""),
-                )
+                # 无正文时直接用标题（FIX-05），不浪费 API 调用
+                article_content = article.get("content", "")
+                article_title = article.get("title", "")
+                if not article_content:
+                    article_summary = article_title
+                else:
+                    article_summary = self.llm_client.summarize_article(
+                        title=article_title,
+                        content=article_content,
+                    )
             except Exception as e:
                 logger.warning(f"文章摘要生成失败: {e}")
 
