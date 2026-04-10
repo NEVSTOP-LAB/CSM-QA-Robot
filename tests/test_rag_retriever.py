@@ -227,6 +227,40 @@ class TestSyncWiki:
         # 不应抛异常
         r.sync_wiki()
 
+    def test_sync_embedding_failure_preserves_old_vectors(
+        self, retriever, wiki_dir
+    ):
+        """embedding 失败时旧向量应保留，不被删除（FIX-23）"""
+        # 首次同步建立基准向量
+        retriever.sync_wiki()
+        initial_count = retriever._wiki_collection.count()
+        assert initial_count > 0
+
+        # 修改文件，模拟 embedding 失败
+        (wiki_dir / "guide.md").write_text(
+            "# 新版指南\n\n新内容。\n", encoding="utf-8"
+        )
+
+        # 让 embedding 抛出异常
+        original_embed = retriever.embedding_fn.embed
+
+        call_count = [0]
+
+        def embed_with_failure(texts):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise RuntimeError("模拟 embedding API 失败")
+            return original_embed(texts)
+
+        retriever.embedding_fn.embed = embed_with_failure
+        retriever.sync_wiki()
+
+        # 旧向量应仍然存在（embedding 失败不删除旧数据）
+        count_after = retriever._wiki_collection.count()
+        assert count_after >= initial_count, (
+            "embedding 失败时旧向量应保留，不应被删除（FIX-23）"
+        )
+
 
 # ===== 检索测试 =====
 

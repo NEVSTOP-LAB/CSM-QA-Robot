@@ -290,23 +290,30 @@ class RAGRetriever:
                 skipped_count += 1
                 continue
 
-            # 删除旧向量
-            try:
-                existing = self._wiki_collection.get(
-                    where={"source": rel_path}
-                )
-                if existing and existing["ids"]:
-                    self._wiki_collection.delete(ids=existing["ids"])
-            except Exception as e:
-                logger.debug(f"删除旧向量时出错（可能不存在）: {e}")
-
             # 分块并 embedding
             content = md_file.read_text(encoding="utf-8")
             chunks = self._chunk_markdown(content, rel_path)
 
             if chunks:
                 texts = [c["text"] for c in chunks]
-                embeddings = self.embedding_fn.embed(texts)
+
+                # FIX-23：先 embedding，成功后再删除旧向量
+                # 避免 embedding 失败（API 超限等）导致当次运行该文件无法检索
+                try:
+                    embeddings = self.embedding_fn.embed(texts)
+                except Exception as e:
+                    logger.warning(f"embedding 失败，跳过 {rel_path}: {e}")
+                    continue
+
+                # embedding 成功后删除旧向量
+                try:
+                    existing = self._wiki_collection.get(
+                        where={"source": rel_path}
+                    )
+                    if existing and existing["ids"]:
+                        self._wiki_collection.delete(ids=existing["ids"])
+                except Exception as e:
+                    logger.debug(f"删除旧向量时出错（可能不存在）: {e}")
 
                 ids = [f"{rel_path}#{i}" for i in range(len(chunks))]
                 metadatas = [
