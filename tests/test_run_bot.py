@@ -840,7 +840,45 @@ class TestWhitelistUsers:
         runner.llm_client.generate_reply.assert_called_once()
 
 
-# ===== 回复索引到 RAG 测试 =====
+# ===== 真人回复索引 question 取值测试（FIX-12）=====
+
+class TestHumanReplyQuestion:
+    """验证 _handle_human_reply 取最近 user 消息作 question（FIX-12）"""
+
+    def test_human_reply_uses_last_user_message(self, runner, bot_root):
+        """真人回复索引时 question 应为最近 user 消息而非 Bot 消息（FIX-12）"""
+        runner.load_config()
+        runner.init_modules()
+
+        runner.zhihu_client = MagicMock()
+        runner.zhihu_client.get_comments.return_value = [
+            _make_comment("hr_1", "作者给出的人工回答", is_author_reply=True),
+        ]
+
+        runner.llm_client = MagicMock()
+        runner.llm_client.summarize_article.return_value = ""
+
+        runner.rag_retriever = MagicMock()
+        runner.rag_retriever.retrieve.return_value = []
+
+        # 模拟 thread_manager 返回 Bot 回复在前、用户提问在后的历史
+        runner.thread_manager = MagicMock()
+        runner.thread_manager.get_or_create_thread.return_value = "mock_path"
+        runner.thread_manager.build_context_messages.return_value = [
+            {"role": "assistant", "content": "[rob]: 上一次 Bot 回复"},
+            {"role": "user", "content": "用户的真实提问"},
+        ]
+
+        runner.process_article(runner.articles[0])
+
+        call_args = runner.rag_retriever.index_human_reply.call_args
+        question = call_args.kwargs.get("question", call_args[0][0] if call_args[0] else "")
+        assert question == "用户的真实提问", (
+            f"question 应为最近 user 消息，但实际为: {question!r}"
+        )
+
+
+
 
 class TestReplyIndexToRAG:
     """验证所有回复内容加入 RAG 学习"""

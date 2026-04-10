@@ -586,14 +586,18 @@ class BotRunner:
 
         # 索引到 reply_index
         if self.rag_retriever:
-            # 获取上一条用户评论作为 question
-            question = "用户评论"  # 简化处理
+            # 从历史消息中找最近一条 role=="user" 的内容作为 question（FIX-12）
+            # 参考: docs/plan/2026-04-10-code-review-fixes.md § FIX-12
+            question = "用户评论"  # 默认值
             if self.thread_manager:
                 messages = self.thread_manager.build_context_messages(
-                    thread_path, max_turns=2
+                    thread_path, max_turns=6
                 )
-                if messages:
-                    question = messages[0].get("content", question)
+                # 从最新向最旧遍历，取第一条 user 消息
+                for msg in reversed(messages):
+                    if msg.get("role") == "user":
+                        question = msg.get("content", question)
+                        break
 
             self.rag_retriever.index_human_reply(
                 question=question,
