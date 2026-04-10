@@ -221,12 +221,25 @@ class TestAuthErrors:
 
     @patch("scripts.zhihu_client.time.sleep")
     def test_403_raises_auth_error(self, mock_sleep, client):
-        """403 响应应抛出 ZhihuAuthError"""
+        """403 响应应抛出 ZhihuAuthError 并携带 status_code=403（FIX-11）"""
         resp = _make_response(403)
 
         with patch.object(client.session, "request", return_value=resp):
-            with pytest.raises(ZhihuAuthError, match="认证失败"):
+            with pytest.raises(ZhihuAuthError) as exc_info:
                 client.get_comments("99", "article")
+
+        assert exc_info.value.status_code == 403
+
+    @patch("scripts.zhihu_client.time.sleep")
+    def test_401_auth_error_carries_status_code(self, mock_sleep, client):
+        """401 ZhihuAuthError 应携带 status_code=401（FIX-11）"""
+        resp = _make_response(401)
+
+        with patch.object(client.session, "request", return_value=resp):
+            with pytest.raises(ZhihuAuthError) as exc_info:
+                client.get_comments("99", "article")
+
+        assert exc_info.value.status_code == 401
 
 
 # ===== 限流重试测试 =====

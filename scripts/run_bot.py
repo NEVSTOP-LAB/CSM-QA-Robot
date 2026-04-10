@@ -730,7 +730,7 @@ class BotRunner:
             except ZhihuAuthError as e:
                 logger.error(f"知乎认证失败: {e}")
                 if self.alert_manager:
-                    self.alert_manager.alert_cookie_expired(401)
+                    self.alert_manager.alert_cookie_expired(e.status_code)
                 break
             except ZhihuRateLimitError as e:
                 logger.error(f"知乎限流: {e}")

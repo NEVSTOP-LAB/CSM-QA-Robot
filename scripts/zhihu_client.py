@@ -38,8 +38,14 @@ logger = logging.getLogger(__name__)
 # ─── 异常定义 ──────────────────────────────────────────────────
 
 class ZhihuAuthError(Exception):
-    """Cookie 失效或认证失败（HTTP 401/403）"""
-    pass
+    """Cookie 失效或认证失败（HTTP 401/403）
+
+    Attributes:
+        status_code: 触发认证失败的 HTTP 状态码（401 或 403）
+    """
+    def __init__(self, message: str = "", status_code: int = 401):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class ZhihuRateLimitError(Exception):
@@ -202,7 +208,8 @@ class ZhihuClient:
                 if response.status_code in (401, 403):
                     logger.error("认证失败 (HTTP %d)，Cookie 可能已失效", response.status_code)
                     raise ZhihuAuthError(
-                        f"认证失败 HTTP {response.status_code}: Cookie 失效或权限不足"
+                        f"认证失败 HTTP {response.status_code}: Cookie 失效或权限不足",
+                        status_code=response.status_code,
                     )
 
                 # 限流 → 指数退避重试
