@@ -1,6 +1,6 @@
 # Zhihu-CSM-Reply-Robot
 
-> 知乎 CSM（客户成功管理）/LabVIEW 专栏自动回复机器人 —— 基于 RAG + DeepSeek LLM，运行于 GitHub Actions
+> 知乎 CSM（Communicable State Machine，通信状态机）/LabVIEW 专栏自动回复机器人 —— 基于 RAG + DeepSeek LLM，运行于 GitHub Actions
 
 ---
 
@@ -39,7 +39,7 @@ articles:
 
   # 知乎问题（监控该问题下所有回答的评论）
   - id: "123456789"
-    title: "如何做好客户成功？"
+    title: "如何使用 CSM 框架？"
     url: "https://www.zhihu.com/question/123456789"
     type: "question"
 
@@ -58,13 +58,13 @@ articles:
 
 ### 3. 准备 CSM Wiki 知识库
 
-将 Markdown 格式的 CSM/LabVIEW 知识文档放入 `csm-wiki/` 目录：
+`csm-wiki/` 目录用于存放**本地补充文档**（可选）。主要知识库来源是 [CSM Wiki](https://nevstop-lab.github.io/CSM-Wiki/)，由 `sync-wiki.yml` 工作流自动从 [NEVSTOP-LAB/CSM-Wiki](https://github.com/NEVSTOP-LAB/CSM-Wiki) 拉取并索引。
+
+本地 `csm-wiki/` 目录可用于放置私有补充文档：
 
 ```
 csm-wiki/
-├── 01-客户成功概述.md
-├── 02-NPS与CSAT指标.md
-├── 03-客户健康度模型.md
+├── 私有补充文档.md
 └── ...
 ```
 
@@ -116,7 +116,7 @@ filter:
 | Workflow | 触发方式 | 功能 |
 |---|---|---|
 | `bot.yml` | **每15分钟** + 手动触发 | 拉取评论 → AI生成回复 → 自动发布或写入 pending/ |
-| `sync-wiki.yml` | 每周日 + 手动触发 | 增量同步 CSM Wiki 向量库 |
+| `sync-wiki.yml` | 每周日 + 手动触发 | 从 [NEVSTOP-LAB/CSM-Wiki](https://github.com/NEVSTOP-LAB/CSM-Wiki) 拉取最新文档并增量同步向量库 |
 
 ### bot.yml 所需 Secrets
 
@@ -147,7 +147,7 @@ Zhihu-CSM-Reply-Robot/
 ├── config/
 │   ├── settings.yaml        # 全局运行参数
 │   └── articles.yaml        # 监控目标列表（文章/问题/专栏/用户）
-├── csm-wiki/                # CSM/LabVIEW 知识库 Markdown 文档（自行添加）
+├── csm-wiki/                # 本地补充文档（可选，主库由 sync-wiki.yml 自动从远程拉取）
 ├── data/
 │   ├── seen_ids.json        # 已处理评论 ID 记录
 │   ├── vector_store/        # ChromaDB 向量库（自动生成）

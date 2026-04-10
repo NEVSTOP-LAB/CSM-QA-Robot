@@ -11,6 +11,9 @@ CSM Wiki 增量同步模块
 - 增量更新向量库
 - 支持强制重建
 
+主要知识库来源：https://github.com/NEVSTOP-LAB/CSM-Wiki（由 sync-wiki.yml 自动拉取）
+本地 csm-wiki/ 目录作为补充（可选）
+
 使用方式：
     python scripts/wiki_sync.py
     FORCE_REBUILD=true python scripts/wiki_sync.py
@@ -46,10 +49,16 @@ def main():
         settings = yaml.safe_load(f)
 
     rag_cfg = settings.get("rag", {})
+    wiki_cfg = settings.get("wiki", {})
+
+    # wiki 目录：优先读取配置，默认为 csm-wiki/
+    # 远端内容由 sync-wiki.yml 拉取到 csm-wiki/remote/，与本地文件共同被扫描
+    local_dir = wiki_cfg.get("local_dir", "csm-wiki")
+    wiki_dir = str(project_root / local_dir)
 
     # 初始化 RAGRetriever
     retriever = RAGRetriever(
-        wiki_dir=str(project_root / "csm-wiki"),
+        wiki_dir=wiki_dir,
         vector_store_dir=str(project_root / "data" / "vector_store"),
         reply_index_dir=str(project_root / "data" / "reply_index"),
         use_online_embedding=rag_cfg.get("use_online_embedding", False),
@@ -61,7 +70,7 @@ def main():
     # 检查是否强制重建
     force = os.environ.get("FORCE_REBUILD", "").lower() in ("true", "1", "yes")
 
-    logger.info(f"开始 Wiki 同步 (force={force})")
+    logger.info(f"开始 Wiki 同步 (wiki_dir={wiki_dir}, force={force})")
     retriever.sync_wiki(force=force)
     logger.info("Wiki 同步完成")
 

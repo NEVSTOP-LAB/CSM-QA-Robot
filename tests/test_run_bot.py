@@ -197,7 +197,7 @@ class TestProcessArticle:
 
         runner.llm_client = MagicMock()
         runner.llm_client.generate_reply.return_value = (
-            "CSM 是客户成功管理的缩写。", 150
+            "CSM 是 Communicable State Machine（通信状态机）框架的缩写。", 150
         )
         # AI 风险评估：高危 → 写入 pending/
         runner.llm_client.assess_risk.return_value = ("risky", "需人工确认")

@@ -25,6 +25,10 @@ rag:
   similarity_threshold: 0.72                      # 相似度阈值（低于此值不返回）
   history_turns: 6                                # 追问时保留最近 N 轮
 
+wiki:
+  remote_repo: "https://github.com/NEVSTOP-LAB/CSM-Wiki.git"   # 远端主知识库（sync-wiki.yml 自动拉取）
+  local_dir: "csm-wiki"                                          # 本地补充文档目录（可选）
+
 vector_store:
   backend: "actions_cache"    # "git"（旧）| "actions_cache"（推荐，参考 AI-011）
   max_size_mb: 500            # 超出时触发清理/重建

@@ -78,8 +78,8 @@ class TestSystemPrompt:
 
         # 第一条消息应为 system
         assert messages[0]["role"] == "system"
-        # 应包含固定的角色定义前缀
-        assert "客户成功" in messages[0]["content"]
+        # 应包含固定的角色定义前缀（CSM = Communicable State Machine）
+        assert "Communicable State Machine" in messages[0]["content"]
         assert "回复规则" in messages[0]["content"]
 
     @patch("scripts.llm_client.time.sleep")
