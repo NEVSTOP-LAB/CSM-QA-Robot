@@ -149,6 +149,7 @@ class ZhihuClient:
         self.write_session.headers["Cookie"] = cookie
 
         # 保留 self.session 为 write_session 的别名，兼容外部代码
+        # TODO: 待外部依赖迁移后可移除此别名
         self.session = self.write_session
 
         logger.info("ZhihuClient 初始化完成，_xsrf=%s...", self._xsrf[:8] if self._xsrf else "N/A")

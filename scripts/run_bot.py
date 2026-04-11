@@ -79,6 +79,11 @@ class BotRunner:
         self._bootstrapped_articles: set[str] = set()
         self._bootstrapped_path = self.root / "data" / "bootstrapped_articles.json"
 
+        # 评论 ID → 线程根 ID 映射（Issue #3：修复多级回复的线程归档逻辑）
+        # 用于在多级嵌套回复中正确追溯到最顶层的根评论，将同一对话归入同一线程文件
+        self._comment_thread_map: dict[str, str] = {}
+        self._comment_thread_map_path = self.root / "data" / "comment_thread_map.json"
+
     def load_config(self):
         """加载配置文件
 
@@ -222,6 +227,63 @@ class BotRunner:
         self._bootstrapped_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self._bootstrapped_path, "w", encoding="utf-8") as f:
             json.dump(sorted(self._bootstrapped_articles), f)
+
+    def load_comment_thread_map(self):
+        """加载评论 ID → 线程根 ID 映射（Issue #3）"""
+        self._comment_thread_map = {}
+        if self._comment_thread_map_path.exists():
+            with open(self._comment_thread_map_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                self._comment_thread_map = {
+                    str(k): str(v) for k, v in data.items()
+                }
+        logger.info("已加载 %d 条评论线程映射", len(self._comment_thread_map))
+
+    def save_comment_thread_map(self):
+        """保存评论 ID → 线程根 ID 映射（Issue #3）"""
+        self._comment_thread_map_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self._comment_thread_map_path, "w", encoding="utf-8") as f:
+            json.dump(self._comment_thread_map, f, ensure_ascii=False)
+
+    def _get_thread_root_id(self, comment) -> str:
+        """确定评论所属对话线程的根 ID（Issue #3：修复多级回复归档）
+
+        Args:
+            comment: Comment 对象
+
+        Returns:
+            线程根评论 ID（str）
+        """
+        if comment.parent_id is None:
+            # 顶级评论，自身即为线程根
+            return comment.id
+
+        # 查找父评论所属的线程根
+        thread_root = self._comment_thread_map.get(comment.parent_id)
+        if thread_root is not None:
+            return thread_root
+
+        # 父评论不在映射中（可能未被本 bot 处理过）
+        # 退回到直接父 ID 作为线程根，与旧行为兼容
+        return comment.parent_id
+
+    def _make_root_comment_info(self, comment) -> dict:
+        """构建 get_or_create_thread 所需的 root_comment 字典（Issue #3）
+
+        当前评论是顶级评论时，用其实际作者信息；
+        当前评论是回复时，线程应已由顶级评论创建，仅传入 ID 即可。
+
+        Args:
+            comment: Comment 对象
+
+        Returns:
+            包含 id 和 author 的字典
+        """
+        thread_root_id = self._get_thread_root_id(comment)
+        # 仅顶级评论时才用真实作者，避免用回复者作者覆盖已有线程的元信息
+        author = comment.author if comment.parent_id is None else "unknown"
+        return {"id": thread_root_id, "author": author}
 
     def _check_daily_limit(self) -> bool:
         """检查是否超过每日处理上限
@@ -401,6 +463,11 @@ class BotRunner:
             comment: Comment 对象
             article_summary: 文章摘要
         """
+        # 尽早更新评论线程映射（Issue #3）：无论该评论是否被过滤，都应记录其所属线程根，
+        # 确保后续的子评论/嵌套回复能通过映射找到正确的根评论。
+        thread_root_id = self._get_thread_root_id(comment)
+        self._comment_thread_map[comment.id] = thread_root_id
+
         # 检测真人回复 → 索引
         # 参考 AI-013: 真人回复高权重索引
         if comment.is_author_reply and self.rag_retriever:
@@ -446,19 +513,14 @@ class BotRunner:
                 ),
             )
 
-        # 构建线程和历史上下文
+        # 构建线程和历史上下文（Issue #3：使用正确的线程根 ID）
+        # thread_root_id 已在函数开头计算并存入映射
         history_messages = []
         thread_path = None  # FIX-15：初始化为 None，后续复用
         if self.thread_manager:
-            root_comment = {
-                "id": comment.parent_id or comment.id,
-                "author": comment.author,
-                "content": comment.content,
-                "created_time": comment.created_time,
-            }
             thread_path = self.thread_manager.get_or_create_thread(
                 article_id=article["id"],
-                root_comment=root_comment,
+                root_comment=self._make_root_comment_info(comment),
                 article_meta=article_meta,
             )
 
@@ -467,6 +529,7 @@ class BotRunner:
                 thread_path=thread_path,
                 author=comment.author,
                 content=comment.content,
+                comment_id=comment.id,
                 is_followup=comment.parent_id is not None,
             )
 
@@ -592,13 +655,12 @@ class BotRunner:
         logger.info(f"检测到真人回复: comment_id={comment.id}")
 
         if self.thread_manager:
-            root_comment = {
-                "id": comment.parent_id or comment.id,
-                "author": comment.author,
-            }
+            # thread_root_id 已在 _process_single_comment 开头通过映射确定
+            thread_root_id = self._get_thread_root_id(comment)
+
             thread_path = self.thread_manager.get_or_create_thread(
                 article_id=article["id"],
-                root_comment=root_comment,
+                root_comment=self._make_root_comment_info(comment),
                 article_meta={
                     "title": article.get("title", ""),
                     "url": article.get("url", ""),
@@ -610,6 +672,7 @@ class BotRunner:
                 thread_path=thread_path,
                 author=comment.author,
                 content=comment.content,
+                comment_id=comment.id,
                 is_human=True,
             )
 
@@ -632,7 +695,7 @@ class BotRunner:
                 question=question,
                 reply=comment.content,
                 article_id=article["id"],
-                thread_id=comment.parent_id or comment.id,
+                thread_id=self._get_thread_root_id(comment),
             )
 
     def _handle_whitelist_comment(self, article: dict, article_meta: dict, comment):
@@ -651,21 +714,20 @@ class BotRunner:
             comment.author, comment.id,
         )
 
-        # 记录到对话线程
+        # 记录到对话线程（Issue #3：thread_root_id 已在 _process_single_comment 开头确定）
         if self.thread_manager:
-            root_comment = {
-                "id": comment.parent_id or comment.id,
-                "author": comment.author,
-            }
+            thread_root_id = self._get_thread_root_id(comment)
+
             thread_path = self.thread_manager.get_or_create_thread(
                 article_id=article["id"],
-                root_comment=root_comment,
+                root_comment=self._make_root_comment_info(comment),
                 article_meta=article_meta,
             )
             self.thread_manager.append_turn(
                 thread_path=thread_path,
                 author=comment.author,
                 content=comment.content,
+                comment_id=comment.id,
             )
 
         # 索引到 RAG 供后续检索
@@ -674,7 +736,7 @@ class BotRunner:
                 question=comment.content,
                 reply=comment.content,
                 article_id=article["id"],
-                thread_id=comment.parent_id or comment.id,
+                thread_id=self._get_thread_root_id(comment),
             )
 
     def _expand_articles(self) -> list[dict]:
@@ -857,6 +919,7 @@ class BotRunner:
 
             self.load_seen_ids()
             self.load_bootstrapped_articles()
+            self.load_comment_thread_map()
 
             # 处理每篇文章
             self.run_articles()
@@ -864,6 +927,7 @@ class BotRunner:
             # 保存状态
             self.save_seen_ids()
             self.save_bootstrapped_articles()
+            self.save_comment_thread_map()
             # 持久化 dedup 缓存（FIX-04）
             if self.comment_filter:
                 self.comment_filter.save_dedup_cache()
