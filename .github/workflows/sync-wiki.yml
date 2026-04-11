@@ -54,14 +54,16 @@ jobs:
 
       - name: Fetch remote CSM-Wiki documents
         run: |
-          # 拉取远端主知识库 NEVSTOP-LAB/CSM-Wiki
-          git clone --depth=1 https://github.com/NEVSTOP-LAB/CSM-Wiki.git /tmp/csm-wiki-remote
-          # 将远端文档合并到 csm-wiki/remote/（--update 确保远端更新能覆盖旧版本）
+          # 从 settings.yaml 读取远端仓库 URL
+          REMOTE_REPO=$(python -c "import yaml; s=yaml.safe_load(open('config/settings.yaml',encoding='utf-8')); print(s.get('wiki',{}).get('remote_repo','https://github.com/NEVSTOP-LAB/CSM-Wiki.git'))")
+          echo "正在拉取远端 CSM-Wiki: $REMOTE_REPO"
+          git clone --depth=1 "$REMOTE_REPO" /tmp/csm-wiki-remote
+          # 镜像到 csm-wiki/remote/，--delete 确保上游删除的文件不在本地残留
           mkdir -p csm-wiki/remote
-          rsync -av --update /tmp/csm-wiki-remote/ csm-wiki/remote/ \
+          rsync -av --delete /tmp/csm-wiki-remote/ csm-wiki/remote/ \
             --exclude '.git' \
             --exclude 'node_modules'
-          echo "远端 CSM-Wiki 文档已合并到 csm-wiki/remote/"
+          echo "远端 CSM-Wiki 文档已同步到 csm-wiki/remote/"
 
       - name: Cache vector stores
         uses: actions/cache@v4
