@@ -19,13 +19,9 @@
 
 ---
 
-## 快速开始
+## 配置
 
-### 1. Fork 仓库
-
-点击右上角 **Fork** 按钮，将仓库 Fork 到自己的 GitHub 账号下。
-
-### 2. 配置监控目标
+### 1. 配置监控目标
 
 编辑 `config/articles.yaml`，支持监控**单篇文章、知乎问题、整个专栏，或某人发布的所有回答**：
 
@@ -56,7 +52,7 @@ articles:
     type: "user_answers"
 ```
 
-### 3. 准备 CSM Wiki 知识库
+### 2. 准备 CSM Wiki 知识库
 
 `csm-wiki/` 目录用于存放**本地补充文档**（可选）。主要知识库来源是 [CSM Wiki](https://nevstop-lab.github.io/CSM-Wiki/)，由 `sync-wiki.yml` 工作流自动从 [NEVSTOP-LAB/CSM-Wiki](https://github.com/NEVSTOP-LAB/CSM-Wiki) 拉取并索引。
 
@@ -68,7 +64,7 @@ csm-wiki/
 └── ...
 ```
 
-### 4. 配置 GitHub Secrets
+### 3. 配置 GitHub Secrets
 
 在仓库 **Settings → Secrets and variables → Actions** 中添加以下 Secrets：
 
@@ -88,7 +84,7 @@ csm-wiki/
 2. 打开开发者工具（F12）→ Network 面板 → 刷新页面
 3. 点击任意知乎请求 → Headers → 复制 `Cookie` 字段的完整值
 
-### 5. 调整运行参数（可选）
+### 4. 调整运行参数（可选）
 
 编辑 `config/settings.yaml`：
 
