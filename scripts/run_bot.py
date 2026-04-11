@@ -74,6 +74,16 @@ class BotRunner:
         self._seen_ids: set[str] = set()
         self._seen_ids_path = self.root / "data" / "seen_ids.json"
 
+        # 已完成冷启动归档的文章集合
+        # 参考: Issue #1 — 首次启动只归档，不回复，避免重复回复历史评论
+        self._bootstrapped_articles: set[str] = set()
+        self._bootstrapped_path = self.root / "data" / "bootstrapped_articles.json"
+
+        # 评论 ID → 线程根 ID 映射（Issue #3：修复多级回复的线程归档逻辑）
+        # 用于在多级嵌套回复中正确追溯到最顶层的根评论，将同一对话归入同一线程文件
+        self._comment_thread_map: dict[str, str] = {}
+        self._comment_thread_map_path = self.root / "data" / "comment_thread_map.json"
+
     def load_config(self):
         """加载配置文件
 
@@ -199,6 +209,99 @@ class BotRunner:
         self._seen_ids_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self._seen_ids_path, "w", encoding="utf-8") as f:
             json.dump(sorted(self._seen_ids), f)
+
+    def load_bootstrapped_articles(self):
+        """加载已完成冷启动归档的文章 ID 集合
+        参考: Issue #1 — 首次启动只归档，不回复
+        """
+        self._bootstrapped_articles = set()
+        if self._bootstrapped_path.exists():
+            with open(self._bootstrapped_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                self._bootstrapped_articles = set(data)
+        logger.info("已加载 %d 个已归档文章 ID", len(self._bootstrapped_articles))
+
+    def save_bootstrapped_articles(self):
+        """保存已完成冷启动归档的文章 ID 集合"""
+        self._bootstrapped_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self._bootstrapped_path, "w", encoding="utf-8") as f:
+            json.dump(sorted(self._bootstrapped_articles), f)
+
+    def load_comment_thread_map(self):
+        """加载评论 ID → 线程根 ID 映射（Issue #3）"""
+        self._comment_thread_map = {}
+        if self._comment_thread_map_path.exists():
+            with open(self._comment_thread_map_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                self._comment_thread_map = {
+                    str(k): str(v) for k, v in data.items()
+                }
+        logger.info("已加载 %d 条评论线程映射", len(self._comment_thread_map))
+
+    def save_comment_thread_map(self):
+        """保存评论 ID → 线程根 ID 映射（Issue #3）"""
+        self._comment_thread_map_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self._comment_thread_map_path, "w", encoding="utf-8") as f:
+            json.dump(self._comment_thread_map, f, ensure_ascii=False)
+
+    def _get_thread_root_id(self, comment) -> str:
+        """确定评论所属对话线程的根 ID（Issue #3：修复多级回复归档）
+
+        沿映射链迭代追溯到真正的根评论，并做路径压缩以提升后续查询效率。
+        内置循环检测防止坏数据导致死循环。
+
+        Args:
+            comment: Comment 对象
+
+        Returns:
+            线程根评论 ID（str）
+        """
+        if comment.parent_id is None:
+            # 顶级评论，自身即为线程根
+            return comment.id
+
+        # 从 parent_id 开始向上迭代追溯
+        current = comment.parent_id
+        visited: set[str] = set()
+
+        while True:
+            if current in visited:
+                # 坏数据导致循环，退出并以当前节点作为根
+                logger.warning("评论映射出现循环，comment_id=%s，以 %s 作为线程根", comment.id, current)
+                break
+            visited.add(current)
+
+            parent = self._comment_thread_map.get(current)
+            if parent is None or parent == current:
+                # 已到达链的顶端
+                break
+            current = parent
+
+        # 路径压缩：将所有经过的中间节点直接指向最终根，加速后续同链查询
+        for node in visited:
+            if self._comment_thread_map.get(node) != current:
+                self._comment_thread_map[node] = current
+
+        return current
+
+    def _make_root_comment_info(self, comment) -> dict:
+        """构建 get_or_create_thread 所需的 root_comment 字典（Issue #3）
+
+        当前评论是顶级评论时，用其实际作者信息；
+        当前评论是回复时，线程应已由顶级评论创建，仅传入 ID 即可。
+
+        Args:
+            comment: Comment 对象
+
+        Returns:
+            包含 id 和 author 的字典
+        """
+        thread_root_id = self._get_thread_root_id(comment)
+        # 仅顶级评论时才用真实作者，避免用回复者作者覆盖已有线程的元信息
+        author = comment.author if comment.parent_id is None else "unknown"
+        return {"id": thread_root_id, "author": author}
 
     def _check_daily_limit(self) -> bool:
         """检查是否超过每日处理上限
@@ -378,6 +481,11 @@ class BotRunner:
             comment: Comment 对象
             article_summary: 文章摘要
         """
+        # 尽早更新评论线程映射（Issue #3）：无论该评论是否被过滤，都应记录其所属线程根，
+        # 确保后续的子评论/嵌套回复能通过映射找到正确的根评论。
+        thread_root_id = self._get_thread_root_id(comment)
+        self._comment_thread_map[comment.id] = thread_root_id
+
         # 检测真人回复 → 索引
         # 参考 AI-013: 真人回复高权重索引
         if comment.is_author_reply and self.rag_retriever:
@@ -423,19 +531,14 @@ class BotRunner:
                 ),
             )
 
-        # 构建线程和历史上下文
+        # 构建线程和历史上下文（Issue #3：使用正确的线程根 ID）
+        # thread_root_id 已在函数开头计算并存入映射
         history_messages = []
         thread_path = None  # FIX-15：初始化为 None，后续复用
         if self.thread_manager:
-            root_comment = {
-                "id": comment.parent_id or comment.id,
-                "author": comment.author,
-                "content": comment.content,
-                "created_time": comment.created_time,
-            }
             thread_path = self.thread_manager.get_or_create_thread(
                 article_id=article["id"],
-                root_comment=root_comment,
+                root_comment=self._make_root_comment_info(comment),
                 article_meta=article_meta,
             )
 
@@ -444,6 +547,7 @@ class BotRunner:
                 thread_path=thread_path,
                 author=comment.author,
                 content=comment.content,
+                comment_id=comment.id,
                 is_followup=comment.parent_id is not None,
             )
 
@@ -569,13 +673,10 @@ class BotRunner:
         logger.info(f"检测到真人回复: comment_id={comment.id}")
 
         if self.thread_manager:
-            root_comment = {
-                "id": comment.parent_id or comment.id,
-                "author": comment.author,
-            }
+            # thread_root_id 已在 _process_single_comment 开头通过映射确定
             thread_path = self.thread_manager.get_or_create_thread(
                 article_id=article["id"],
-                root_comment=root_comment,
+                root_comment=self._make_root_comment_info(comment),
                 article_meta={
                     "title": article.get("title", ""),
                     "url": article.get("url", ""),
@@ -587,6 +688,7 @@ class BotRunner:
                 thread_path=thread_path,
                 author=comment.author,
                 content=comment.content,
+                comment_id=comment.id,
                 is_human=True,
             )
 
@@ -609,7 +711,7 @@ class BotRunner:
                 question=question,
                 reply=comment.content,
                 article_id=article["id"],
-                thread_id=comment.parent_id or comment.id,
+                thread_id=self._get_thread_root_id(comment),
             )
 
     def _handle_whitelist_comment(self, article: dict, article_meta: dict, comment):
@@ -628,21 +730,18 @@ class BotRunner:
             comment.author, comment.id,
         )
 
-        # 记录到对话线程
+        # 记录到对话线程（Issue #3：thread_root_id 已在 _process_single_comment 开头确定）
         if self.thread_manager:
-            root_comment = {
-                "id": comment.parent_id or comment.id,
-                "author": comment.author,
-            }
             thread_path = self.thread_manager.get_or_create_thread(
                 article_id=article["id"],
-                root_comment=root_comment,
+                root_comment=self._make_root_comment_info(comment),
                 article_meta=article_meta,
             )
             self.thread_manager.append_turn(
                 thread_path=thread_path,
                 author=comment.author,
                 content=comment.content,
+                comment_id=comment.id,
             )
 
         # 索引到 RAG 供后续检索
@@ -651,7 +750,7 @@ class BotRunner:
                 question=comment.content,
                 reply=comment.content,
                 article_id=article["id"],
-                thread_id=comment.parent_id or comment.id,
+                thread_id=self._get_thread_root_id(comment),
             )
 
     def _expand_articles(self) -> list[dict]:
@@ -721,10 +820,51 @@ class BotRunner:
 
         return expanded
 
+    def _bootstrap_article(self, article: dict):
+        """冷启动归档：首次监控该文章时将所有现存评论标记为已见，不生成回复
+        参考: Issue #1 — 避免对历史评论重复回复
+
+        Args:
+            article: 文章配置信息
+        """
+        if not self.zhihu_client:
+            return
+
+        article_id = article["id"]
+        object_type = article.get("type", "article")
+
+        try:
+            comments = self.zhihu_client.get_comments(
+                object_id=article_id,
+                object_type=object_type,
+            )
+        except (ZhihuAuthError, ZhihuRateLimitError):
+            # 认证失败或限流时，向上传播，让 run_articles 处理告警
+            # 不标记为已归档，下次运行时重试
+            raise
+        except Exception as e:
+            logger.warning("冷启动获取文章 %s 评论失败: %s，跳过本次冷启动", article_id, e)
+            # 注意：故意不加入 _bootstrapped_articles，下次运行继续重试冷启动
+            return
+
+        new_ids = {c.id for c in comments if c.id not in self._seen_ids}
+        if new_ids:
+            logger.info(
+                "文章 %s 冷启动归档 %d 条历史评论（不回复）",
+                article_id, len(new_ids),
+            )
+            self._seen_ids.update(new_ids)
+        else:
+            logger.info("文章 %s 冷启动：无需归档（无新评论）", article_id)
+
+        # 仅在成功完成归档后才标记，保证下次运行时可以正常进入回复流程
+        self._bootstrapped_articles.add(article_id)
+
     def run_articles(self):
         """处理所有文章（可单独调用，便于测试）
 
         先展开 column/user_answers 类型，再逐篇处理评论。
+        未完成冷启动归档的文章先归档再处理（Issue #1）。
         捕获认证/限流/预算异常并触发告警。
         """
         # 展开 column/user_answers 为具体的文章/回答
@@ -734,6 +874,22 @@ class BotRunner:
         for article in articles_to_process:
             if not self._check_daily_limit():
                 break
+
+            # 冷启动归档（Issue #1）：首次监控时归档历史评论，不回复
+            if article["id"] not in self._bootstrapped_articles:
+                try:
+                    self._bootstrap_article(article)
+                except ZhihuAuthError as e:
+                    logger.error(f"冷启动归档认证失败: {e}")
+                    if self.alert_manager:
+                        self.alert_manager.alert_cookie_expired(e.status_code)
+                    break
+                except ZhihuRateLimitError as e:
+                    logger.error(f"冷启动归档限流: {e}")
+                    if self.alert_manager:
+                        self.alert_manager.alert_rate_limited()
+                    break
+                continue  # 本次 run 跳过正式处理，下次 run 再回复新评论
 
             try:
                 self.process_article(article)
@@ -784,12 +940,16 @@ class BotRunner:
                     logger.warning(f"Wiki 同步失败（不影响主流程）: {e}")
 
             self.load_seen_ids()
+            self.load_bootstrapped_articles()
+            self.load_comment_thread_map()
 
             # 处理每篇文章
             self.run_articles()
 
             # 保存状态
             self.save_seen_ids()
+            self.save_bootstrapped_articles()
+            self.save_comment_thread_map()
             # 持久化 dedup 缓存（FIX-04）
             if self.comment_filter:
                 self.comment_filter.save_dedup_cache()

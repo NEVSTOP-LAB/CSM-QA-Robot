@@ -152,6 +152,171 @@ class TestSeenIds:
         assert runner._seen_ids == set()
 
 
+# ===== 冷启动归档测试（Issue #1）=====
+
+class TestBootstrapMode:
+    """验证冷启动归档逻辑（Issue #1）：首次运行只归档不回复"""
+
+    def test_bootstrap_archives_existing_comments(self, runner, bot_root):
+        """首次运行时，已有评论应被归档到 seen_ids，不生成回复"""
+        runner.load_config()
+        runner.init_modules()
+
+        runner.zhihu_client = MagicMock()
+        runner.zhihu_client.get_comments.return_value = [
+            _make_comment("old_1", "旧评论1"),
+            _make_comment("old_2", "旧评论2"),
+        ]
+        runner.llm_client = MagicMock()
+        runner.rag_retriever = MagicMock()
+
+        # 初始无 bootstrapped_articles，模拟首次运行
+        runner.load_seen_ids()
+
+        runner.run_articles()
+
+        # 旧评论应被加入 seen_ids，不触发 LLM
+        assert "old_1" in runner._seen_ids
+        assert "old_2" in runner._seen_ids
+        runner.llm_client.generate_reply.assert_not_called()
+
+    def test_bootstrap_skips_already_seen(self, runner, bot_root):
+        """冷启动时，已在 seen_ids 中的评论不重复计入"""
+        runner.load_config()
+        runner.init_modules()
+
+        runner.zhihu_client = MagicMock()
+        runner.zhihu_client.get_comments.return_value = [
+            _make_comment("existing", "已有评论"),
+        ]
+        runner.llm_client = MagicMock()
+        runner.rag_retriever = MagicMock()
+
+        runner.load_seen_ids()
+        runner._seen_ids.add("existing")  # 已存在
+
+        runner.run_articles()
+
+        # 已存在的 ID 不应重复处理
+        runner.llm_client.generate_reply.assert_not_called()
+
+    def test_bootstrap_marks_article_as_bootstrapped(self, runner, bot_root):
+        """冷启动完成后，文章应被标记为已归档"""
+        runner.load_config()
+        runner.init_modules()
+
+        runner.zhihu_client = MagicMock()
+        runner.zhihu_client.get_comments.return_value = []
+        runner.llm_client = MagicMock()
+        runner.rag_retriever = MagicMock()
+
+        runner.load_seen_ids()
+
+        runner.run_articles()
+
+        assert "99999" in runner._bootstrapped_articles
+
+    def test_bootstrapped_articles_persisted(self, runner, bot_root):
+        """已归档文章集合应能保存并重新加载"""
+        runner.load_config()
+        runner._bootstrapped_articles = {"a1", "a2"}
+        runner.save_bootstrapped_articles()
+
+        runner2 = BotRunner(project_root=runner.root)
+        runner2.load_config()
+        runner2.load_bootstrapped_articles()
+        assert runner2._bootstrapped_articles == {"a1", "a2"}
+
+    def test_bootstrapped_articles_empty_when_no_file(self, runner, bot_root):
+        """无文件时应返回空集合"""
+        runner.load_config()
+        runner.load_bootstrapped_articles()
+        assert runner._bootstrapped_articles == set()
+
+    def test_second_run_processes_new_comments(self, runner, bot_root):
+        """冷启动后第二次运行，应正常处理新评论"""
+        runner.load_config()
+        runner.init_modules()
+
+        runner.zhihu_client = MagicMock()
+        runner.zhihu_client.get_comments.return_value = [
+            _make_comment("new_1", "新评论"),
+        ]
+        runner.zhihu_client.post_comment.return_value = True
+
+        runner.llm_client = MagicMock()
+        runner.llm_client.generate_reply.return_value = ("回复内容", 50)
+        runner.llm_client.assess_risk.return_value = ("safe", "安全")
+        runner.llm_client.total_cost_usd = 0.0
+        runner.llm_client.total_prompt_tokens = 0
+        runner.llm_client.total_completion_tokens = 0
+        runner.llm_client.total_cache_hit_tokens = 0
+        runner.llm_client.model = "deepseek-chat"
+        runner.llm_client.summarize_article.return_value = ""
+
+        runner.rag_retriever = MagicMock()
+        runner.rag_retriever.retrieve.return_value = []
+
+        # 模拟已完成冷启动
+        runner.load_seen_ids()
+        runner._bootstrapped_articles.add("99999")
+
+        runner.run_articles()
+
+        # 新评论应被 LLM 处理
+        runner.llm_client.generate_reply.assert_called_once()
+
+    def test_bootstrap_auth_error_triggers_alert(self, runner, bot_root):
+        """冷启动时认证失败应触发告警"""
+        runner.load_config()
+        runner.init_modules()
+
+        runner.zhihu_client = MagicMock()
+        runner.zhihu_client.get_comments.side_effect = ZhihuAuthError(
+            "Cookie 过期", status_code=401
+        )
+        runner.llm_client = MagicMock()
+        runner.rag_retriever = MagicMock()
+        runner.alert_manager = MagicMock()
+
+        runner.load_seen_ids()
+        runner.run_articles()
+
+        runner.alert_manager.alert_cookie_expired.assert_called_once()
+
+    def test_bootstrap_rate_limit_triggers_alert(self, runner, bot_root):
+        """冷启动时限流应触发告警并终止（Issue review feedback）"""
+        runner.load_config()
+        runner.init_modules()
+
+        runner.zhihu_client = MagicMock()
+        runner.zhihu_client.get_comments.side_effect = ZhihuRateLimitError("限流")
+        runner.llm_client = MagicMock()
+        runner.rag_retriever = MagicMock()
+        runner.alert_manager = MagicMock()
+
+        runner.load_seen_ids()
+        runner.run_articles()
+
+        runner.alert_manager.alert_rate_limited.assert_called_once()
+
+    def test_bootstrap_generic_failure_does_not_mark_bootstrapped(self, runner, bot_root):
+        """冷启动时发生通用异常后，文章不应被标记为已归档（避免跳过重试）"""
+        runner.load_config()
+        runner.init_modules()
+
+        runner.zhihu_client = MagicMock()
+        runner.zhihu_client.get_comments.side_effect = Exception("临时网络错误")
+        runner.llm_client = MagicMock()
+        runner.rag_retriever = MagicMock()
+
+        runner.load_seen_ids()
+        runner.run_articles()
+
+        # 文章不应被标记为已归档，以便下次运行时可以重试
+        assert "99999" not in runner._bootstrapped_articles
+
+
 # ===== 文章处理测试 =====
 
 class TestProcessArticle:
@@ -324,6 +489,7 @@ class TestExceptionHandling:
         runner.alert_manager = MagicMock()
 
         runner.load_seen_ids()
+        runner._bootstrapped_articles.add("99999")  # 跳过冷启动，直接测试正式处理
         runner.run_articles()
         runner.alert_manager.alert_budget_exceeded.assert_called_once()
 
@@ -1215,3 +1381,192 @@ class TestMaxNewCommentsPerRun:
 
         # 无限制时 4 条全处理
         assert runner.llm_client.generate_reply.call_count == 4
+
+
+# ===== 多级回复线程归档测试（Issue #3）=====
+
+class TestCommentThreadMap:
+    """验证评论 ID → 线程根 ID 映射（Issue #3：修复多级回复归档）"""
+
+    def test_root_comment_maps_to_itself(self, runner, bot_root):
+        """顶级评论（无 parent_id）的线程根应为其自身"""
+        runner.load_config()
+        root_comment = _make_comment("root_1", "顶级评论", parent_id=None)
+        thread_root = runner._get_thread_root_id(root_comment)
+        assert thread_root == "root_1"
+
+    def test_reply_uses_parent_as_root_when_no_map(self, runner, bot_root):
+        """无映射时，回复的线程根退回到直接父 ID"""
+        runner.load_config()
+        reply = _make_comment("reply_1", "回复", parent_id="root_1")
+        thread_root = runner._get_thread_root_id(reply)
+        assert thread_root == "root_1"
+
+    def test_nested_reply_follows_map(self, runner, bot_root):
+        """多级嵌套回复应通过映射找到真正的根"""
+        runner.load_config()
+        # 模拟：root_1 → root_1, reply_1 → root_1
+        runner._comment_thread_map = {"reply_1": "root_1"}
+        nested = _make_comment("nested_1", "嵌套回复", parent_id="reply_1")
+        thread_root = runner._get_thread_root_id(nested)
+        assert thread_root == "root_1"
+
+    def test_map_updated_after_processing_root(self, runner, bot_root):
+        """处理顶级评论后，映射应记录 comment_id → comment_id"""
+        runner.load_config()
+        runner.init_modules()
+
+        runner.zhihu_client = MagicMock()
+        runner.zhihu_client.get_comments.return_value = [
+            _make_comment("root_1", "顶级评论", parent_id=None),
+        ]
+        runner.zhihu_client.post_comment.return_value = True
+
+        runner.llm_client = MagicMock()
+        runner.llm_client.generate_reply.return_value = ("回复内容", 50)
+        runner.llm_client.assess_risk.return_value = ("safe", "安全")
+        runner.llm_client.total_cost_usd = 0.0
+        runner.llm_client.total_prompt_tokens = 0
+        runner.llm_client.total_completion_tokens = 0
+        runner.llm_client.total_cache_hit_tokens = 0
+        runner.llm_client.model = "deepseek-chat"
+        runner.llm_client.summarize_article.return_value = ""
+
+        runner.rag_retriever = MagicMock()
+        runner.rag_retriever.retrieve.return_value = []
+
+        runner.process_article(runner.articles[0])
+
+        assert "root_1" in runner._comment_thread_map
+        assert runner._comment_thread_map["root_1"] == "root_1"
+
+    def test_map_updated_after_processing_reply(self, runner, bot_root):
+        """处理回复评论后，映射应记录 reply_id → root_id"""
+        runner.load_config()
+        runner.init_modules()
+
+        # root 已在映射中
+        runner._comment_thread_map = {"root_1": "root_1"}
+
+        runner.zhihu_client = MagicMock()
+        runner.zhihu_client.get_comments.return_value = [
+            _make_comment("reply_1", "回复评论", parent_id="root_1"),
+        ]
+        runner.zhihu_client.post_comment.return_value = True
+
+        runner.llm_client = MagicMock()
+        runner.llm_client.generate_reply.return_value = ("回复内容", 50)
+        runner.llm_client.assess_risk.return_value = ("safe", "安全")
+        runner.llm_client.total_cost_usd = 0.0
+        runner.llm_client.total_prompt_tokens = 0
+        runner.llm_client.total_completion_tokens = 0
+        runner.llm_client.total_cache_hit_tokens = 0
+        runner.llm_client.model = "deepseek-chat"
+        runner.llm_client.summarize_article.return_value = ""
+
+        runner.rag_retriever = MagicMock()
+        runner.rag_retriever.retrieve.return_value = []
+
+        runner.process_article(runner.articles[0])
+
+        assert runner._comment_thread_map.get("reply_1") == "root_1"
+
+    def test_multilevel_all_go_to_same_thread(self, runner, bot_root):
+        """多级回复链应全部归入同一线程文件"""
+        runner.load_config()
+        runner.init_modules()
+
+        runner.zhihu_client = MagicMock()
+        runner.zhihu_client.get_comments.return_value = [
+            _make_comment("root_1", "根评论", parent_id=None),
+            _make_comment("reply_1", "一级回复", parent_id="root_1"),
+            _make_comment("reply_2", "二级回复", parent_id="reply_1"),
+        ]
+        runner.zhihu_client.post_comment.return_value = True
+
+        runner.llm_client = MagicMock()
+        runner.llm_client.generate_reply.return_value = ("回复内容", 50)
+        runner.llm_client.assess_risk.return_value = ("safe", "安全")
+        runner.llm_client.total_cost_usd = 0.0
+        runner.llm_client.total_prompt_tokens = 0
+        runner.llm_client.total_completion_tokens = 0
+        runner.llm_client.total_cache_hit_tokens = 0
+        runner.llm_client.model = "deepseek-chat"
+        runner.llm_client.summarize_article.return_value = ""
+
+        runner.rag_retriever = MagicMock()
+        runner.rag_retriever.retrieve.return_value = []
+
+        runner.process_article(runner.articles[0])
+
+        # 三条评论应全部映射到 root_1
+        assert runner._comment_thread_map.get("root_1") == "root_1"
+        assert runner._comment_thread_map.get("reply_1") == "root_1"
+        assert runner._comment_thread_map.get("reply_2") == "root_1"
+
+        # 线程文件应只有一个（root_1.md），不应有 reply_1.md 或 reply_2.md
+        thread_dir = bot_root / "archive" / "articles" / "99999" / "threads"
+        if thread_dir.exists():
+            thread_files = list(thread_dir.glob("*.md"))
+            thread_ids = {f.stem for f in thread_files}
+            assert "root_1" in thread_ids, "root_1.md 应存在"
+            assert "reply_1" not in thread_ids, "reply_1.md 不应存在（应归入 root_1.md）"
+            assert "reply_2" not in thread_ids, "reply_2.md 不应存在（应归入 root_1.md）"
+
+    def test_comment_thread_map_persisted(self, runner, bot_root):
+        """评论线程映射应能保存和重新加载"""
+        runner.load_config()
+        runner._comment_thread_map = {"c1": "r1", "c2": "r1", "c3": "r2"}
+        runner.save_comment_thread_map()
+
+        runner2 = BotRunner(project_root=runner.root)
+        runner2.load_config()
+        runner2.load_comment_thread_map()
+        assert runner2._comment_thread_map == {"c1": "r1", "c2": "r1", "c3": "r2"}
+
+    def test_comment_thread_map_empty_when_no_file(self, runner, bot_root):
+        """无文件时应返回空映射"""
+        runner.load_config()
+        runner.load_comment_thread_map()
+        assert runner._comment_thread_map == {}
+
+    def test_deep_chain_resolved_to_root(self, runner, bot_root):
+        """深层嵌套回复链应迭代追溯到最终根，而非仅做一次跳转"""
+        runner.load_config()
+        # chain: c4 → c3 → c2 → c1 → c1（c1 是根）
+        runner._comment_thread_map = {
+            "c1": "c1",
+            "c2": "c1",
+            "c3": "c2",   # 指向中间节点，仅做一次跳转时会返回 c2 而非 c1
+        }
+        deep = _make_comment("c4", "深层回复", parent_id="c3")
+        thread_root = runner._get_thread_root_id(deep)
+        assert thread_root == "c1", (
+            f"深层回复链应追溯到真正的根 c1，但得到 {thread_root!r}"
+        )
+
+    def test_cycle_in_map_does_not_loop_forever(self, runner, bot_root):
+        """映射中存在循环时，_get_thread_root_id 应安全返回而不死循环"""
+        runner.load_config()
+        # 人工构造一个损坏的循环映射
+        runner._comment_thread_map = {
+            "x": "y",
+            "y": "x",
+        }
+        cycle = _make_comment("z", "某评论", parent_id="x")
+        # 不应死循环，应返回某个非空字符串
+        result = runner._get_thread_root_id(cycle)
+        assert isinstance(result, str) and result != ""
+
+    def test_path_compression_applied(self, runner, bot_root):
+        """路径压缩：查询后中间节点应直接指向最终根"""
+        runner.load_config()
+        runner._comment_thread_map = {
+            "c1": "c1",
+            "c2": "c1",
+            "c3": "c2",  # 未压缩时 c3 指向 c2，压缩后应指向 c1
+        }
+        c4 = _make_comment("c4", "深层", parent_id="c3")
+        runner._get_thread_root_id(c4)
+        # 路径压缩后，c3 应直接指向 c1
+        assert runner._comment_thread_map.get("c3") == "c1"
