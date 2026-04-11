@@ -74,6 +74,11 @@ class BotRunner:
         self._seen_ids: set[str] = set()
         self._seen_ids_path = self.root / "data" / "seen_ids.json"
 
+        # 已完成冷启动归档的文章集合
+        # 参考: Issue #1 — 首次启动只归档，不回复，避免重复回复历史评论
+        self._bootstrapped_articles: set[str] = set()
+        self._bootstrapped_path = self.root / "data" / "bootstrapped_articles.json"
+
     def load_config(self):
         """加载配置文件
 
@@ -199,6 +204,24 @@ class BotRunner:
         self._seen_ids_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self._seen_ids_path, "w", encoding="utf-8") as f:
             json.dump(sorted(self._seen_ids), f)
+
+    def load_bootstrapped_articles(self):
+        """加载已完成冷启动归档的文章 ID 集合
+        参考: Issue #1 — 首次启动只归档，不回复
+        """
+        self._bootstrapped_articles = set()
+        if self._bootstrapped_path.exists():
+            with open(self._bootstrapped_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                self._bootstrapped_articles = set(data)
+        logger.info("已加载 %d 个已归档文章 ID", len(self._bootstrapped_articles))
+
+    def save_bootstrapped_articles(self):
+        """保存已完成冷启动归档的文章 ID 集合"""
+        self._bootstrapped_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self._bootstrapped_path, "w", encoding="utf-8") as f:
+            json.dump(sorted(self._bootstrapped_articles), f)
 
     def _check_daily_limit(self) -> bool:
         """检查是否超过每日处理上限
@@ -721,10 +744,48 @@ class BotRunner:
 
         return expanded
 
+    def _bootstrap_article(self, article: dict):
+        """冷启动归档：首次监控该文章时将所有现存评论标记为已见，不生成回复
+        参考: Issue #1 — 避免对历史评论重复回复
+
+        Args:
+            article: 文章配置信息
+        """
+        if not self.zhihu_client:
+            return
+
+        article_id = article["id"]
+        object_type = article.get("type", "article")
+
+        try:
+            comments = self.zhihu_client.get_comments(
+                object_id=article_id,
+                object_type=object_type,
+            )
+        except (ZhihuAuthError, ZhihuRateLimitError):
+            # 认证失败或限流时，向上传播，让 run_articles 处理告警
+            raise
+        except Exception as e:
+            logger.warning("冷启动获取文章 %s 评论失败: %s", article_id, e)
+            comments = []
+
+        new_ids = {c.id for c in comments if c.id not in self._seen_ids}
+        if new_ids:
+            logger.info(
+                "文章 %s 冷启动归档 %d 条历史评论（不回复）",
+                article_id, len(new_ids),
+            )
+            self._seen_ids.update(new_ids)
+        else:
+            logger.info("文章 %s 冷启动：无需归档（无新评论）", article_id)
+
+        self._bootstrapped_articles.add(article_id)
+
     def run_articles(self):
         """处理所有文章（可单独调用，便于测试）
 
         先展开 column/user_answers 类型，再逐篇处理评论。
+        未完成冷启动归档的文章先归档再处理（Issue #1）。
         捕获认证/限流/预算异常并触发告警。
         """
         # 展开 column/user_answers 为具体的文章/回答
@@ -734,6 +795,17 @@ class BotRunner:
         for article in articles_to_process:
             if not self._check_daily_limit():
                 break
+
+            # 冷启动归档（Issue #1）：首次监控时归档历史评论，不回复
+            if article["id"] not in self._bootstrapped_articles:
+                try:
+                    self._bootstrap_article(article)
+                except ZhihuAuthError as e:
+                    logger.error(f"冷启动归档认证失败: {e}")
+                    if self.alert_manager:
+                        self.alert_manager.alert_cookie_expired(e.status_code)
+                    break
+                continue  # 本次 run 跳过正式处理，下次 run 再回复新评论
 
             try:
                 self.process_article(article)
@@ -784,12 +856,14 @@ class BotRunner:
                     logger.warning(f"Wiki 同步失败（不影响主流程）: {e}")
 
             self.load_seen_ids()
+            self.load_bootstrapped_articles()
 
             # 处理每篇文章
             self.run_articles()
 
             # 保存状态
             self.save_seen_ids()
+            self.save_bootstrapped_articles()
             # 持久化 dedup 缓存（FIX-04）
             if self.comment_filter:
                 self.comment_filter.save_dedup_cache()

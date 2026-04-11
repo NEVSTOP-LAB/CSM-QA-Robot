@@ -152,6 +152,139 @@ class TestSeenIds:
         assert runner._seen_ids == set()
 
 
+# ===== 冷启动归档测试（Issue #1）=====
+
+class TestBootstrapMode:
+    """验证冷启动归档逻辑（Issue #1）：首次运行只归档不回复"""
+
+    def test_bootstrap_archives_existing_comments(self, runner, bot_root):
+        """首次运行时，已有评论应被归档到 seen_ids，不生成回复"""
+        runner.load_config()
+        runner.init_modules()
+
+        runner.zhihu_client = MagicMock()
+        runner.zhihu_client.get_comments.return_value = [
+            _make_comment("old_1", "旧评论1"),
+            _make_comment("old_2", "旧评论2"),
+        ]
+        runner.llm_client = MagicMock()
+        runner.rag_retriever = MagicMock()
+
+        # 初始无 bootstrapped_articles，模拟首次运行
+        runner.load_seen_ids()
+
+        runner.run_articles()
+
+        # 旧评论应被加入 seen_ids，不触发 LLM
+        assert "old_1" in runner._seen_ids
+        assert "old_2" in runner._seen_ids
+        runner.llm_client.generate_reply.assert_not_called()
+
+    def test_bootstrap_skips_already_seen(self, runner, bot_root):
+        """冷启动时，已在 seen_ids 中的评论不重复计入"""
+        runner.load_config()
+        runner.init_modules()
+
+        runner.zhihu_client = MagicMock()
+        runner.zhihu_client.get_comments.return_value = [
+            _make_comment("existing", "已有评论"),
+        ]
+        runner.llm_client = MagicMock()
+        runner.rag_retriever = MagicMock()
+
+        runner.load_seen_ids()
+        runner._seen_ids.add("existing")  # 已存在
+
+        runner.run_articles()
+
+        # 已存在的 ID 不应重复处理
+        runner.llm_client.generate_reply.assert_not_called()
+
+    def test_bootstrap_marks_article_as_bootstrapped(self, runner, bot_root):
+        """冷启动完成后，文章应被标记为已归档"""
+        runner.load_config()
+        runner.init_modules()
+
+        runner.zhihu_client = MagicMock()
+        runner.zhihu_client.get_comments.return_value = []
+        runner.llm_client = MagicMock()
+        runner.rag_retriever = MagicMock()
+
+        runner.load_seen_ids()
+
+        runner.run_articles()
+
+        assert "99999" in runner._bootstrapped_articles
+
+    def test_bootstrapped_articles_persisted(self, runner, bot_root):
+        """已归档文章集合应能保存并重新加载"""
+        runner.load_config()
+        runner._bootstrapped_articles = {"a1", "a2"}
+        runner.save_bootstrapped_articles()
+
+        runner2 = BotRunner(project_root=runner.root)
+        runner2.load_config()
+        runner2.load_bootstrapped_articles()
+        assert runner2._bootstrapped_articles == {"a1", "a2"}
+
+    def test_bootstrapped_articles_empty_when_no_file(self, runner, bot_root):
+        """无文件时应返回空集合"""
+        runner.load_config()
+        runner.load_bootstrapped_articles()
+        assert runner._bootstrapped_articles == set()
+
+    def test_second_run_processes_new_comments(self, runner, bot_root):
+        """冷启动后第二次运行，应正常处理新评论"""
+        runner.load_config()
+        runner.init_modules()
+
+        runner.zhihu_client = MagicMock()
+        runner.zhihu_client.get_comments.return_value = [
+            _make_comment("new_1", "新评论"),
+        ]
+        runner.zhihu_client.post_comment.return_value = True
+
+        runner.llm_client = MagicMock()
+        runner.llm_client.generate_reply.return_value = ("回复内容", 50)
+        runner.llm_client.assess_risk.return_value = ("safe", "安全")
+        runner.llm_client.total_cost_usd = 0.0
+        runner.llm_client.total_prompt_tokens = 0
+        runner.llm_client.total_completion_tokens = 0
+        runner.llm_client.total_cache_hit_tokens = 0
+        runner.llm_client.model = "deepseek-chat"
+        runner.llm_client.summarize_article.return_value = ""
+
+        runner.rag_retriever = MagicMock()
+        runner.rag_retriever.retrieve.return_value = []
+
+        # 模拟已完成冷启动
+        runner.load_seen_ids()
+        runner._bootstrapped_articles.add("99999")
+
+        runner.run_articles()
+
+        # 新评论应被 LLM 处理
+        runner.llm_client.generate_reply.assert_called_once()
+
+    def test_bootstrap_auth_error_triggers_alert(self, runner, bot_root):
+        """冷启动时认证失败应触发告警"""
+        runner.load_config()
+        runner.init_modules()
+
+        runner.zhihu_client = MagicMock()
+        runner.zhihu_client.get_comments.side_effect = ZhihuAuthError(
+            "Cookie 过期", status_code=401
+        )
+        runner.llm_client = MagicMock()
+        runner.rag_retriever = MagicMock()
+        runner.alert_manager = MagicMock()
+
+        runner.load_seen_ids()
+        runner.run_articles()
+
+        runner.alert_manager.alert_cookie_expired.assert_called_once()
+
+
 # ===== 文章处理测试 =====
 
 class TestProcessArticle:
@@ -324,6 +457,7 @@ class TestExceptionHandling:
         runner.alert_manager = MagicMock()
 
         runner.load_seen_ids()
+        runner._bootstrapped_articles.add("99999")  # 跳过冷启动，直接测试正式处理
         runner.run_articles()
         runner.alert_manager.alert_budget_exceeded.assert_called_once()
 
