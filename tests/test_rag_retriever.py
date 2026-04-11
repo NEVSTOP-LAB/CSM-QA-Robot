@@ -31,14 +31,14 @@ def wiki_dir(tmp_path: Path) -> Path:
 
     # 创建两个测试 Wiki 文件
     (wiki / "guide.md").write_text(
-        "# 客户成功指南\n\n客户成功（CSM）是一种方法论。\n\n"
-        "## 核心概念\n\n客户生命周期管理是关键。\n",
+        "# CSM 框架指南\n\nCSM（Communicable State Machine，通信状态机）是一种 LabVIEW 设计框架。\n\n"
+        "## 核心概念\n\n状态机通过消息通信实现模块解耦。\n",
         encoding="utf-8"
     )
     (wiki / "faq.md").write_text(
         "# 常见问题\n\n## 什么是 CSM？\n\n"
-        "CSM 即 Customer Success Management。\n\n"
-        "## 如何处理投诉？\n\n建立投诉处理流程。\n",
+        "CSM 即 Communicable State Machine（通信状态机）。\n\n"
+        "## 如何处理状态切换？\n\n通过发送消息触发状态转换。\n",
         encoding="utf-8"
     )
     return wiki
@@ -314,7 +314,7 @@ class TestRetrieve:
     def test_retrieve_returns_results(self, retriever, wiki_dir):
         """同步后应能检索到结果"""
         retriever.sync_wiki()
-        results = retriever.retrieve("客户成功", k=3, threshold=0.0)
+        results = retriever.retrieve("CSM 框架", k=3, threshold=0.0)
         # 由于假向量，降低阈值确保有结果
         assert len(results) > 0
 
@@ -346,7 +346,7 @@ class TestIndexHumanReply:
         """索引真人回复后应能查询到"""
         retriever.index_human_reply(
             question="CSM 是什么？",
-            reply="CSM 是客户成功管理的缩写。",
+            reply="CSM 是 Communicable State Machine（通信状态机）框架的缩写。",
             article_id="12345",
             thread_id="t001",
         )
@@ -357,8 +357,8 @@ class TestIndexHumanReply:
     def test_index_human_reply_metadata(self, retriever):
         """真人回复应包含 weight=high 元数据"""
         retriever.index_human_reply(
-            question="如何做客户成功？",
-            reply="关键是主动服务。",
+            question="如何使用 CSM 框架？",
+            reply="关键是主动定义状态和消息接口。",
             article_id="99999",
             thread_id="t002",
         )
@@ -389,13 +389,13 @@ class TestIndexHumanReply:
         """检索时真人回复应优先于 Wiki 结果"""
         retriever.sync_wiki()
         retriever.index_human_reply(
-            question="客户成功的核心",
-            reply="核心是客户留存和价值最大化",
+            question="CSM 框架的核心",
+            reply="核心是状态机的消息驱动和模块解耦",
             article_id="12345",
             thread_id="t001",
         )
 
-        results = retriever.retrieve("客户成功", k=3, threshold=0.0)
+        results = retriever.retrieve("CSM 框架", k=3, threshold=0.0)
         # 应有结果
         assert len(results) > 0
         # 第一条应来自 reply_index（包含真人回复文本）

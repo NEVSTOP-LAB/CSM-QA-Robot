@@ -2,7 +2,8 @@
 # 实施计划关联：docs/plan/README.md sync-wiki.yml
 # 参考文档：docs/调研/04-CSM-Wiki-RAG知识库.md
 #
-# 功能：同步 CSM Wiki 文档并更新向量索引
+# 功能：从 NEVSTOP-LAB/CSM-Wiki 拉取最新文档，合并本地补充文档，
+#       然后更新向量索引。
 # 触发条件：
 #   - 每周日 UTC 00:00 自动运行
 #   - 支持手动触发（可选择强制重建）
@@ -50,6 +51,19 @@ jobs:
         with:
           path: ~/.cache/huggingface
           key: hf-${{ runner.os }}-bge-small-zh-v1.5
+
+      - name: Fetch remote CSM-Wiki documents
+        run: |
+          # 从 settings.yaml 读取远端仓库 URL
+          REMOTE_REPO=$(python -c "import yaml; s=yaml.safe_load(open('config/settings.yaml',encoding='utf-8')); print(s.get('wiki',{}).get('remote_repo','https://github.com/NEVSTOP-LAB/CSM-Wiki.git'))")
+          echo "正在拉取远端 CSM-Wiki: $REMOTE_REPO"
+          git clone --depth=1 "$REMOTE_REPO" /tmp/csm-wiki-remote
+          # 镜像到 csm-wiki/remote/，--delete 确保上游删除的文件不在本地残留
+          mkdir -p csm-wiki/remote
+          rsync -av --delete /tmp/csm-wiki-remote/ csm-wiki/remote/ \
+            --exclude '.git' \
+            --exclude 'node_modules'
+          echo "远端 CSM-Wiki 文档已同步到 csm-wiki/remote/"
 
       - name: Cache vector stores
         uses: actions/cache@v4

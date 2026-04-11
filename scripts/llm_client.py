@@ -40,7 +40,8 @@ class BudgetExceededError(Exception):
 # 参考: docs/调研/03-LLM接入与回复生成.md § Prompt 结构（三段式）
 # 参考: docs/调研/06-Token优化策略.md § 2. Prompt Caching
 SYSTEM_PROMPT_PREFIX = (
-    "你是 CSM（客户成功管理）助理，代表专栏作者回复知乎评论。\n"
+    "你是 CSM（Communicable State Machine，通信状态机）框架及 LabVIEW 技术专家，"
+    "代表专栏作者回复知乎评论。\n"
     "回复规则：\n"
     "1. 专业、友善、简洁（200字以内）\n"
     "2. 基于知识库内容回复，不编造信息\n"
@@ -294,7 +295,8 @@ class LLMClient:
                 "content": (
                     "你是风险评估助手。判断一条自动生成的知乎评论回复是否可以直接发布。\n"
                     "判断规则：\n"
-                    "1. 如果回复是关于 CSM（客户成功管理）、LabVIEW、NI、JKISM/CSM框架 "
+                    "1. 如果回复是关于 CSM（Communicable State Machine，通信状态机）、"
+                    "LabVIEW、NI、JKISM/CSM框架 "
                     "等技术话题的正常回答，回复 SAFE\n"
                     "2. 如果回复涉及以下情况，回复 RISKY：\n"
                     "   - 政治、宗教等敏感话题\n"

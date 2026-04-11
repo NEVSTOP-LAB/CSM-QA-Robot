@@ -25,6 +25,9 @@ rag:
   similarity_threshold: 0.72                      # 相似度阈值（低于此值不返回）
   history_turns: 6                                # 追问时保留最近 N 轮
 
+wiki:
+  base_dir: "csm-wiki"   # 知识库根目录（包含 remote/ 子目录和本地补充文档）
+
 vector_store:
   backend: "actions_cache"    # "git"（旧）| "actions_cache"（推荐，参考 AI-011）
   max_size_mb: 500            # 超出时触发清理/重建
