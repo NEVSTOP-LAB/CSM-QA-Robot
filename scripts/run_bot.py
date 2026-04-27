@@ -499,14 +499,14 @@ class BotRunner:
 
         # 检测专家回复 → 索引
         if message.is_author_reply and self.rag_retriever:
-            self._handle_human_reply(topic, topic_meta, message)
+            self._handle_expert_reply(topic, topic_meta, message)
             self._seen_ids.add(message.id)
             return
 
         # 白名单用户：仅记录到线程，不做 AI 处理
         whitelist = self.settings.get("bot", {}).get("whitelist_users", [])
         if message.author in whitelist:
-            self._handle_whitelist_comment(topic, topic_meta, message)
+            self._handle_whitelist_message(topic, topic_meta, message)
             self._seen_ids.add(message.id)
             return
 
@@ -641,26 +641,26 @@ class BotRunner:
         self._seen_ids.add(message.id)
         self._processed_count += 1
 
-    def _handle_human_reply(self, article: dict, article_meta: dict, comment):
-        """处理作者真人回复
+    def _handle_expert_reply(self, topic: dict, topic_meta: dict, message: Message):
+        """处理专家/维护者的权威回复
 
         检测到 is_author_reply=True 的消息时，
         找到对应 thread，提取 QA 对，索引到 reply_index。
         """
-        logger.info(f"检测到专家回复: comment_id={comment.id}")
+        logger.info(f"检测到专家回复: message_id={message.id}")
 
         if self.thread_manager:
             thread_path = self.thread_manager.get_or_create_thread(
-                article_id=article["id"],
-                root_comment=self._make_root_comment_info(comment),
+                article_id=topic["id"],
+                root_comment=self._make_root_comment_info(message),
                 article_meta={
-                    "title": article.get("title", ""),
-                    "url": article.get("url", ""),
+                    "title": topic.get("title", ""),
+                    "url": topic.get("url", ""),
                 },
             )
 
             # 从历史中找最近一条 role=="user" 的内容作为 question
-            question_for_rag = "用户评论"  # 默认值
+            question_for_rag = "用户消息"  # 默认值
             if self.rag_retriever:
                 messages = self.thread_manager.build_context_messages(
                     thread_path, max_turns=6
@@ -673,61 +673,61 @@ class BotRunner:
             # 追加专家回复（带 ⭐ 标记）
             self.thread_manager.append_turn(
                 thread_path=thread_path,
-                author=comment.author,
-                content=comment.content,
-                comment_id=comment.id,
+                author=message.author,
+                content=message.content,
+                comment_id=message.id,
                 is_human=True,
             )
 
         # 索引到 reply_index
         if self.rag_retriever:
             if not self.thread_manager:
-                question_for_rag = "用户评论"
+                question_for_rag = "用户消息"
 
             self.rag_retriever.index_human_reply(
                 question=question_for_rag,
-                reply=comment.content,
-                article_id=article["id"],
-                thread_id=self._get_thread_root_id(comment),
+                reply=message.content,
+                article_id=topic["id"],
+                thread_id=self._get_thread_root_id(message),
             )
 
-    def _handle_whitelist_comment(self, article: dict, article_meta: dict, comment):
+    def _handle_whitelist_message(self, topic: dict, topic_meta: dict, message: Message):
         """处理白名单用户的消息
 
-        白名单用户（维护者等）的回复仅记录到对话线程和 RAG，
+        白名单用户（维护者等）的消息仅记录到对话线程和 RAG，
         不触发 AI 生成回复，节省 token。
 
         Args:
-            article: 话题配置
-            article_meta: 话题元信息
-            comment: Message 对象
+            topic: 话题配置
+            topic_meta: 话题元信息
+            message: Message 对象
         """
         logger.info(
-            "白名单用户 %s 的消息，仅记录: comment_id=%s",
-            comment.author, comment.id,
+            "白名单用户 %s 的消息，仅记录: message_id=%s",
+            message.author, message.id,
         )
 
         # 记录到对话线程
         if self.thread_manager:
             thread_path = self.thread_manager.get_or_create_thread(
-                article_id=article["id"],
-                root_comment=self._make_root_comment_info(comment),
-                article_meta=article_meta,
+                article_id=topic["id"],
+                root_comment=self._make_root_comment_info(message),
+                article_meta=topic_meta,
             )
             self.thread_manager.append_turn(
                 thread_path=thread_path,
-                author=comment.author,
-                content=comment.content,
-                comment_id=comment.id,
+                author=message.author,
+                content=message.content,
+                comment_id=message.id,
             )
 
         # 索引到 RAG 供后续检索
         if self.rag_retriever:
             self.rag_retriever.index_human_reply(
-                question=comment.content,
-                reply=comment.content,
-                article_id=article["id"],
-                thread_id=self._get_thread_root_id(comment),
+                question=message.content,
+                reply=message.content,
+                article_id=topic["id"],
+                thread_id=self._get_thread_root_id(message),
             )
 
     def _read_inbox(self) -> list[Message]:
