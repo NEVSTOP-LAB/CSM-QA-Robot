@@ -125,12 +125,15 @@ class CSM_QA:
             wiki_path = Path(wiki_dir)
             source_file = wiki_path.parent / "wiki_source.json"
             if not wiki_path.exists() and source_file.exists():
-                # wiki 目录尚未克隆，但存在 wiki_source.json —— 触发远程同步
+                # wiki 目录尚未克隆，但存在 wiki_source.json —— 触发远程同步。
+                # 强制 force_sync=True 确保即使 commit_id 已与远端一致也执行 clone，
+                # 避免本地目录缺失时 check_and_update_wiki 跳过拉取、RAG 仍为空。
                 try:
                     check_and_update_wiki(
                         source_file=source_file,
                         local_dir=wiki_path,
                         retriever=self._rag,
+                        force_sync=True,
                     )
                 except Exception as exc:
                     logger.warning("auto_sync_wiki (remote) 失败（已忽略）: %s", exc)

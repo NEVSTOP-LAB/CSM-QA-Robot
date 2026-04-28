@@ -219,7 +219,7 @@ def _write_wiki_source(parent: Path, url: str = "https://github.com/A/B") -> Pat
 
 
 def test_auto_sync_wiki_triggers_remote_when_dir_missing(tmp_dir):
-    """wiki 目录不存在 + wiki_source.json 存在 → 调用 check_and_update_wiki。"""
+    """wiki 目录不存在 + wiki_source.json 存在 → 以 force_sync=True 调用 check_and_update_wiki。"""
     wiki_parent = tmp_dir / "csm-wiki"
     wiki_parent.mkdir()
     _write_wiki_source(wiki_parent)
@@ -243,6 +243,45 @@ def test_auto_sync_wiki_triggers_remote_when_dir_missing(tmp_dir):
     mock_remote.assert_called_once()
     _, call_kwargs = mock_remote.call_args
     assert call_kwargs["local_dir"] == wiki_dir
+    # 目录缺失时必须强制 clone，即使 commit_id 与远端一致
+    assert call_kwargs["force_sync"] is True
+
+
+def test_auto_sync_wiki_force_sync_when_dir_missing_and_commit_matches(tmp_dir):
+    """wiki 目录不存在 + wiki_source.json 中 commit_id 已与远端一致 → 仍强制 clone。
+
+    未加 force_sync=True 时，check_and_update_wiki 会直接 return False（不 clone），
+    导致 wiki_dir 仍缺失、RAG 仍为空。此场景验证 force_sync=True 被传入。
+    """
+    sha = "a" * 40
+    wiki_parent = tmp_dir / "csm-wiki"
+    wiki_parent.mkdir()
+    # commit_id 写入与远端相同的值
+    source_file = wiki_parent / "wiki_source.json"
+    source_file.write_text(
+        json.dumps({"url": "https://github.com/A/B", "commit_id": sha}),
+        encoding="utf-8",
+    )
+    wiki_dir = wiki_parent / "remote"  # 故意不创建
+
+    with (
+        patch("csm_qa.api.LLMClient") as mock_llm_cls,
+        patch("csm_qa.api.EmbeddingFunction", return_value=FakeEmbedding()),
+        patch("csm_qa.api.check_and_update_wiki") as mock_remote,
+    ):
+        mock_llm_cls.return_value = MagicMock()
+        mock_remote.return_value = True
+
+        CSM_QA(
+            api_key="sk-test",
+            wiki_dir=wiki_dir,
+            vector_store_dir=tmp_dir / "store",
+            auto_sync_wiki=True,
+        )
+
+    mock_remote.assert_called_once()
+    _, call_kwargs = mock_remote.call_args
+    assert call_kwargs["force_sync"] is True
 
 
 def test_auto_sync_wiki_uses_regular_sync_when_dir_exists(tmp_dir):
