@@ -23,6 +23,12 @@ logger = logging.getLogger(__name__)
 
 EmbeddingProvider = Literal["local", "openai"]
 
+# HuggingFace 镜像回落顺序：国内镜像 → 官方 → 用户配置（运行时拼入）。
+_HF_FALLBACK_ENDPOINTS = [
+    "https://hf-mirror.com",
+    "https://huggingface.co",
+]
+
 
 def _preview_text(text: str, limit: int = 80) -> str:
     compact = " ".join(text.split())
@@ -55,20 +61,28 @@ class EmbeddingFunction:
 
     # ─── 内部加载 ────────────────────────────────────────────────
 
-    def _configure_huggingface_endpoint(self) -> None:
-        # HF_ENDPOINT 为空字符串会导致 huggingface_hub 构造无协议前缀的 URL。
-        # 默认使用国内镜像站，避免 huggingface.co 不可访问时下载失败。
-        # 如需使用官方源，可通过环境变量显式设置 HF_ENDPOINT=https://huggingface.co。
-        if os.environ.get("HF_ENDPOINT", "").strip():
-            return
-
-        os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+    @staticmethod
+    def _apply_huggingface_endpoint(endpoint: str) -> None:
+        """将 ``endpoint`` 写入环境变量并同步 huggingface_hub 内部常量。"""
+        os.environ["HF_ENDPOINT"] = endpoint
         try:
             import huggingface_hub.constants as _hf_constants
 
-            _hf_constants.ENDPOINT = "https://hf-mirror.com"
+            _hf_constants.ENDPOINT = endpoint
         except Exception:
             pass
+
+    def _build_hf_endpoint_candidates(self) -> list[str]:
+        """构造 HuggingFace 镜像回落候选列表。
+
+        顺序：国内镜像站 → 官方 → 用户通过 ``HF_ENDPOINT`` 配置的地址。
+        用户配置地址若与前两者重复则跳过。
+        """
+        candidates = list(_HF_FALLBACK_ENDPOINTS)
+        user_endpoint = os.environ.get("HF_ENDPOINT", "").strip()
+        if user_endpoint and user_endpoint not in candidates:
+            candidates.append(user_endpoint)
+        return candidates
 
     def _create_local_model(self):
         from sentence_transformers import SentenceTransformer
@@ -79,19 +93,25 @@ class EmbeddingFunction:
         if self._local_model_error is not None:
             raise RuntimeError("本地 Embedding 模型初始化失败，已停止后续重试") from self._local_model_error
 
-        if self._local_model is None:
-            self._configure_huggingface_endpoint()
-            logger.info("加载本地 Embedding 模型: %s", self.model)
+        if self._local_model is not None:
+            return self._local_model
+
+        # 读取用户配置端点（在遍历前保存，避免循环内修改环境变量影响读取）
+        candidates = self._build_hf_endpoint_candidates()
+        last_exc: Optional[Exception] = None
+        for endpoint in candidates:
+            self._apply_huggingface_endpoint(endpoint)
+            logger.info("尝试从 %s 加载本地 Embedding 模型: %s", endpoint, self.model)
             try:
                 self._local_model = self._create_local_model()
+                return self._local_model
             except Exception as exc:
-                self._local_model_error = exc
-                logger.warning(
-                    "加载本地 Embedding 模型失败，已停止后续重试: %s",
-                    exc,
-                )
-                raise RuntimeError("本地 Embedding 模型初始化失败") from exc
-        return self._local_model
+                logger.warning("从 %s 加载本地 Embedding 模型失败: %s", endpoint, exc)
+                last_exc = exc
+
+        self._local_model_error = last_exc
+        logger.warning("本地 Embedding 模型初始化失败，所有端点均不可用，已停止后续重试")
+        raise RuntimeError("本地 Embedding 模型初始化失败，所有端点均不可用") from last_exc
 
     def _get_online_client(self):
         if self._online_client is None:
