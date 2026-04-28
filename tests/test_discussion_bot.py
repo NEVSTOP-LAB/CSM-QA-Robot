@@ -178,13 +178,13 @@ def test_has_bot_replied_author_is_none():
 class _MockGraphQL:
     """最小化 mock GitHubGraphQL，直接返回预设 data。"""
 
-    def __init__(self, return_data: dict, raise_error: Optional[str] = None):
+    def __init__(self, return_data: dict, raise_error_message: Optional[str] = None):
         self._return_data = return_data
-        self._raise_error = raise_error
+        self._raise_error_message = raise_error_message
 
     def query(self, gql: str, variables: Optional[dict] = None) -> dict:
-        if self._raise_error:
-            raise RuntimeError(self._raise_error)
+        if self._raise_error_message:
+            raise RuntimeError(self._raise_error_message)
         return self._return_data
 
 
@@ -194,7 +194,7 @@ def test_get_viewer_login_returns_login():
 
 
 def test_get_viewer_login_returns_none_on_error():
-    client = _MockGraphQL({}, raise_error="Unauthorized")
+    client = _MockGraphQL({}, raise_error_message="Unauthorized")
     assert get_viewer_login(client) is None
 
 

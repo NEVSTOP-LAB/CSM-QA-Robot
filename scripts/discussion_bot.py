@@ -503,8 +503,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     try:
         if args.event:
             run_event_mode(
-                client, qa_engine, owner, repo, qa_category_id,
-                dry_run=args.dry_run, bot_login=bot_login,
+                client,
+                qa_engine,
+                owner,
+                repo,
+                qa_category_id,
+                dry_run=args.dry_run,
+                bot_login=bot_login,
             )
         else:
             run_manual_mode(

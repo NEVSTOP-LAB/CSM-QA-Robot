@@ -103,7 +103,7 @@ class EmbeddingFunction:
             import huggingface_hub.constants as _hf_const_mod
 
             original_hf_const = _hf_const_mod.ENDPOINT
-        except Exception:
+        except (ImportError, AttributeError):
             _hf_const_mod = None  # type: ignore[assignment]
 
         candidates = self._build_hf_endpoint_candidates()
@@ -128,7 +128,7 @@ class EmbeddingFunction:
                 try:
                     _hf_const_mod.ENDPOINT = original_hf_const
                 except Exception:
-                    pass
+                    logger.warning("恢复 huggingface_hub.constants.ENDPOINT 失败（已忽略）")
 
         self._local_model_error = last_exc
         logger.warning("本地 Embedding 模型初始化失败，所有端点均不可用，已停止后续重试")
