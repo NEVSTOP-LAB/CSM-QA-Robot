@@ -39,12 +39,16 @@ if _REPO_ROOT not in sys.path:
 
 from csm_qa import CSM_QA  # noqa: E402
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)-8s %(name)s %(message)s",
-    datefmt="%Y-%m-%dT%H:%M:%S",
-)
 logger = logging.getLogger("discussion_bot")
+
+
+def _configure_logging() -> None:
+    """配置根日志（仅在脚本直接运行时调用，避免作为库导入时污染全局日志配置）。"""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)-8s %(name)s %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    )
 
 # ── 常量 ────────────────────────────────────────────────────────────────────
 
@@ -162,13 +166,47 @@ def resolve_qa_category_id(client: GitHubGraphQL, owner: str, repo: str) -> str:
     )
 
 
+def _fetch_more_comments(
+    client: GitHubGraphQL, discussion_id: str, after_cursor: str
+) -> dict[str, Any]:
+    """拉取 Discussion 的后续评论页（用于分页）。
+
+    Returns:
+        ``{"nodes": [...], "pageInfo": {"hasNextPage": bool, "endCursor": str|None}}``
+    """
+    gql = """
+    query($discussionId: ID!, $after: String!) {
+      node(id: $discussionId) {
+        ... on Discussion {
+          comments(first: 100, after: $after) {
+            nodes {
+              id
+              body
+              author { login }
+            }
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
+          }
+        }
+      }
+    }
+    """
+    data = client.query(gql, {"discussionId": discussion_id, "after": after_cursor})
+    return data.get("node", {}).get(
+        "comments",
+        {"nodes": [], "pageInfo": {"hasNextPage": False, "endCursor": None}},
+    )
+
+
 def fetch_discussion(
     client: GitHubGraphQL, owner: str, repo: str, number: int
 ) -> dict[str, Any]:
-    """拉取指定 discussion 的详情（含前 100 条评论）。
+    """拉取指定 discussion 的详情（含所有评论，自动分页）。
 
-    注意：每次最多拉取 100 条评论。若 discussion 评论数超过 100，
-    超出部分不会被检查，可能导致已有 Bot 回复未被检测到（重复回复）。
+    通过 ``pageInfo { hasNextPage endCursor }`` 分页拉取，直至拿到全部评论，
+    从而确保 :func:`has_bot_replied` 能正确检测已有 Bot 回复。
     """
     gql = """
     query($owner: String!, $repo: String!, $number: Int!) {
@@ -189,6 +227,10 @@ def fetch_discussion(
               body
               author { login }
             }
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
           }
         }
       }
@@ -198,13 +240,54 @@ def fetch_discussion(
     disc = data.get("repository", {}).get("discussion")
     if not disc:
         raise RuntimeError(f"Discussion #{number} 不存在或无权限访问")
+
+    # 分页拉取剩余评论
+    while disc["comments"]["pageInfo"]["hasNextPage"]:
+        cursor = disc["comments"]["pageInfo"]["endCursor"]
+        more = _fetch_more_comments(client, disc["id"], cursor)
+        disc["comments"]["nodes"].extend(more.get("nodes", []))
+        disc["comments"]["pageInfo"] = more.get(
+            "pageInfo", {"hasNextPage": False, "endCursor": None}
+        )
+
     return disc
 
 
-def has_bot_replied(discussion: dict) -> bool:
-    """检查 Discussion 评论中是否已含 BOT_MARKER，防止重复回复。"""
+def get_viewer_login(client: GitHubGraphQL) -> Optional[str]:
+    """查询当前 PAT 对应的 GitHub 账号（用于作者身份校验）。
+
+    Returns:
+        登录名字符串，或 ``None``（查询失败时）。
+    """
+    gql = """
+    query {
+      viewer { login }
+    }
+    """
+    try:
+        data = client.query(gql)
+        return data.get("viewer", {}).get("login") or None
+    except RuntimeError as exc:
+        logger.warning("无法获取 viewer 登录名，将跳过作者校验: %s", exc)
+        return None
+
+
+def has_bot_replied(discussion: dict, bot_login: Optional[str] = None) -> bool:
+    """检查 Discussion 评论中是否已含 BOT_MARKER（可选：同时校验作者身份）。
+
+    Args:
+        discussion: :func:`fetch_discussion` 返回的 discussion dict。
+        bot_login: Bot 的 GitHub 登录名；若提供，则只有 **作者为 bot_login**
+            且含 BOT_MARKER 的评论才算"Bot 已回复"。不提供时仅按 marker 判断。
+    """
     for comment in discussion.get("comments", {}).get("nodes", []):
-        if BOT_MARKER in (comment.get("body") or ""):
+        body = comment.get("body") or ""
+        if BOT_MARKER not in body:
+            continue
+        if bot_login is None:
+            return True
+        author = (comment.get("author") or {}).get("login", "")
+        if author == bot_login:
             return True
     return False
 
@@ -242,6 +325,7 @@ def process_discussion(
     qa_category_id: str,
     *,
     dry_run: bool = False,
+    bot_login: Optional[str] = None,
 ) -> bool:
     """处理单条 Discussion，返回 True 表示已回复（或 dry-run 打印），False 表示跳过。"""
     discussion = fetch_discussion(client, owner, repo, number)
@@ -256,7 +340,7 @@ def process_discussion(
         )
         return False
 
-    if has_bot_replied(discussion):
+    if has_bot_replied(discussion, bot_login=bot_login):
         logger.info("Discussion #%d 已有 Bot 回复，跳过", number)
         return False
 
@@ -291,6 +375,7 @@ def run_event_mode(
     qa_category_id: str,
     *,
     dry_run: bool = False,
+    bot_login: Optional[str] = None,
 ) -> None:
     """读取 GITHUB_EVENT_PATH 中的 payload，处理 discussion.created 事件。"""
     event_path = os.environ.get("GITHUB_EVENT_PATH", "")
@@ -320,6 +405,7 @@ def run_event_mode(
         int(number),
         qa_category_id,
         dry_run=dry_run,
+        bot_login=bot_login,
     )
 
 
@@ -332,6 +418,7 @@ def run_manual_mode(
     discussion_number: int,
     *,
     dry_run: bool = False,
+    bot_login: Optional[str] = None,
 ) -> None:
     """手动模式：直接处理指定 discussion。"""
     process_discussion(
@@ -342,6 +429,7 @@ def run_manual_mode(
         discussion_number,
         qa_category_id,
         dry_run=dry_run,
+        bot_login=bot_login,
     )
 
 
@@ -374,6 +462,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    _configure_logging()
     args = parse_args(argv)
 
     # ── 读取 Token ──────────────────────────────────────────────────────────
@@ -391,6 +480,13 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     client = GitHubGraphQL(gh_token)
 
+    # ── 获取 Bot 登录名（用于作者身份校验，失败时降级为仅 marker 检测）──────
+    bot_login = get_viewer_login(client)
+    if bot_login:
+        logger.info("Bot 账号: %s", bot_login)
+    else:
+        logger.warning("无法获取 Bot 账号，has_bot_replied 将仅按 marker 检测")
+
     try:
         qa_category_id = resolve_qa_category_id(client, owner, repo)
     except RuntimeError as exc:
@@ -407,7 +503,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     try:
         if args.event:
             run_event_mode(
-                client, qa_engine, owner, repo, qa_category_id, dry_run=args.dry_run
+                client, qa_engine, owner, repo, qa_category_id,
+                dry_run=args.dry_run, bot_login=bot_login,
             )
         else:
             run_manual_mode(
@@ -418,6 +515,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 qa_category_id,
                 args.discussion_number,
                 dry_run=args.dry_run,
+                bot_login=bot_login,
             )
     except RuntimeError as exc:
         logger.error("%s", exc)

@@ -96,18 +96,39 @@ class EmbeddingFunction:
         if self._local_model is not None:
             return self._local_model
 
-        # 读取用户配置端点（在遍历前保存，避免循环内修改环境变量影响读取）
+        # 保存原始 HF 端点状态，确保修改不永久影响全局配置
+        original_hf_env: Optional[str] = os.environ.get("HF_ENDPOINT")
+        original_hf_const: Optional[str] = None
+        try:
+            import huggingface_hub.constants as _hf_const_mod
+
+            original_hf_const = _hf_const_mod.ENDPOINT
+        except Exception:
+            _hf_const_mod = None  # type: ignore[assignment]
+
         candidates = self._build_hf_endpoint_candidates()
         last_exc: Optional[Exception] = None
-        for endpoint in candidates:
-            self._apply_huggingface_endpoint(endpoint)
-            logger.info("尝试从 %s 加载本地 Embedding 模型: %s", endpoint, self.model)
-            try:
-                self._local_model = self._create_local_model()
-                return self._local_model
-            except Exception as exc:
-                logger.warning("从 %s 加载本地 Embedding 模型失败: %s", endpoint, exc)
-                last_exc = exc
+        try:
+            for endpoint in candidates:
+                self._apply_huggingface_endpoint(endpoint)
+                logger.info("尝试从 %s 加载本地 Embedding 模型: %s", endpoint, self.model)
+                try:
+                    self._local_model = self._create_local_model()
+                    return self._local_model
+                except Exception as exc:
+                    logger.warning("从 %s 加载本地 Embedding 模型失败: %s", endpoint, exc)
+                    last_exc = exc
+        finally:
+            # 无论成功还是失败，恢复调用前的端点配置（避免永久污染全局状态）
+            if original_hf_env is None:
+                os.environ.pop("HF_ENDPOINT", None)
+            else:
+                os.environ["HF_ENDPOINT"] = original_hf_env
+            if _hf_const_mod is not None and original_hf_const is not None:
+                try:
+                    _hf_const_mod.ENDPOINT = original_hf_const
+                except Exception:
+                    pass
 
         self._local_model_error = last_exc
         logger.warning("本地 Embedding 模型初始化失败，所有端点均不可用，已停止后续重试")

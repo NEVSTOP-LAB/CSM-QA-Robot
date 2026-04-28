@@ -287,3 +287,54 @@ def test_local_embedding_user_endpoint_not_duplicated(monkeypatch):
     embedding = EmbeddingFunction()
     candidates = embedding._build_hf_endpoint_candidates()
     assert candidates.count("https://hf-mirror.com") == 1
+
+
+def test_local_embedding_restores_hf_endpoint_after_success(monkeypatch):
+    """模型加载成功后，HF_ENDPOINT 环境变量应恢复到调用前的值。"""
+    original = "https://original-endpoint.example.com"
+    monkeypatch.setenv("HF_ENDPOINT", original)
+    embedding = EmbeddingFunction()
+
+    class FakeModel:
+        def encode(self, texts, normalize_embeddings=True):
+            class R:
+                def tolist(self):
+                    return [[1.0]]
+            return R()
+
+    monkeypatch.setattr(EmbeddingFunction, "_create_local_model", lambda self: FakeModel())
+    embedding.embed(["test"])
+    assert os.environ.get("HF_ENDPOINT") == original
+
+
+def test_local_embedding_restores_hf_endpoint_after_failure(monkeypatch):
+    """所有端点失败后，HF_ENDPOINT 环境变量应恢复到调用前的值。"""
+    original = "https://original-endpoint.example.com"
+    monkeypatch.setenv("HF_ENDPOINT", original)
+    embedding = EmbeddingFunction()
+
+    monkeypatch.setattr(
+        EmbeddingFunction, "_create_local_model", lambda self: (_ for _ in ()).throw(RuntimeError("fail"))
+    )
+
+    with pytest.raises(RuntimeError):
+        embedding.embed(["test"])
+
+    assert os.environ.get("HF_ENDPOINT") == original
+
+
+def test_local_embedding_removes_hf_endpoint_env_when_originally_absent(monkeypatch):
+    """HF_ENDPOINT 原本不存在时，加载后应将其从环境变量中移除（而非留下最后一次尝试的值）。"""
+    monkeypatch.delenv("HF_ENDPOINT", raising=False)
+    embedding = EmbeddingFunction()
+
+    class FakeModel:
+        def encode(self, texts, normalize_embeddings=True):
+            class R:
+                def tolist(self):
+                    return [[1.0]]
+            return R()
+
+    monkeypatch.setattr(EmbeddingFunction, "_create_local_model", lambda self: FakeModel())
+    embedding.embed(["test"])
+    assert "HF_ENDPOINT" not in os.environ
