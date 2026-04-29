@@ -18,6 +18,9 @@ CSM_QA_API_KEY   Fine-grained PAT（需要 repository discussions: read & write 
 LLM_API_KEY      DeepSeek / 其他 LLM 的 API Key
 GITHUB_REPOSITORY  格式 owner/repo，如 NEVSTOP-LAB/CSM-QA-Robot（Actions 自动注入）
 GITHUB_EVENT_PATH  event 模式时由 Actions 自动注入
+DISCUSSION_SOURCE_REPO
+    （可选）组织级 Q&A discussions 实际归属的源仓库 owner/repo，
+    默认 ``<org>/.github``，其中 ``<org>`` 取自 ``GITHUB_REPOSITORY``。
 """
 
 from __future__ import annotations
@@ -122,6 +125,35 @@ def _get_repo_parts() -> tuple[str, str]:
         )
     owner, repo = repo_env.split("/", 1)
     return owner, repo
+
+
+def _get_source_repo_parts() -> tuple[str, str]:
+    """解析组织级 Q&A discussions 实际归属的"源仓库"。
+
+    GitHub 上 ``/orgs/<org>/discussions/...`` 这种组织级 discussions 在底层
+    其实存储于某个具体仓库（通常是 ``<org>/.github``）。本函数返回该源仓库
+    的 ``(owner, repo)``，优先读取环境变量 ``DISCUSSION_SOURCE_REPO``，
+    缺省时回退为 ``<org>/.github``，其中 ``<org>`` 取自 ``GITHUB_REPOSITORY``。
+
+    Raises:
+        ValueError: 环境变量配置不正确。
+    """
+    src = os.environ.get("DISCUSSION_SOURCE_REPO", "").strip()
+    if src:
+        if "/" not in src:
+            raise ValueError(
+                f"DISCUSSION_SOURCE_REPO 格式不正确: {src!r}，期望 'owner/repo'"
+            )
+        owner, repo = src.split("/", 1)
+        owner = owner.strip()
+        repo = repo.strip()
+        if not owner or not repo:
+            raise ValueError(
+                f"DISCUSSION_SOURCE_REPO 格式不正确: {src!r}，期望 'owner/repo'"
+            )
+        return owner, repo
+    org, _ = _get_repo_parts()
+    return org, ".github"
 
 
 def resolve_qa_category_id(client: GitHubGraphQL, owner: str, repo: str) -> str:
@@ -408,167 +440,99 @@ def build_reply(answer: str) -> str:
     return f"{answer.rstrip()}{BOT_FOOTER}\n{BOT_MARKER}"
 
 
-def resolve_org_qa_category_id(client: GitHubGraphQL, org: str) -> str:
-    """通过 GraphQL 查询组织中名为 'Q&A' 的 Discussion Category node ID。
+def resolve_org_qa_category_id(
+    client: GitHubGraphQL, source_owner: str, source_repo: str
+) -> str:
+    """通过 GraphQL 查询组织级 Q&A discussions 源仓库中名为 'Q&A' 的
+    Discussion Category node ID。
 
-    GitHub GraphQL 的 ``Organization`` 类型没有 ``discussionCategories`` 字段，
-    也没有 ``discussions`` 字段；获取组织内全部仓库的讨论需要使用
-    ``Organization.repositoryDiscussions``。这里通过扫描组织内已有的讨论
-    来提取分类信息。
+    GitHub 的 "Organization discussions"（``/orgs/<org>/discussions/``）实际
+    存储于某个源仓库（通常是 ``<org>/.github``）。这里直接查询源仓库的
+    ``discussionCategories``，比扫描 ``Organization.repositoryDiscussions``
+    既快又稳，且只需要对源仓库的 Discussions: Read 权限。
 
     Raises:
         RuntimeError: 未找到 Q&A category。
     """
     gql = """
-    query($org: String!, $cursor: String) {
-      organization(login: $org) {
-        repositoryDiscussions(first: 100, after: $cursor, orderBy: {field: CREATED_AT, direction: DESC}) {
+    query($owner: String!, $repo: String!) {
+      repository(owner: $owner, name: $repo) {
+        discussionCategories(first: 30) {
           nodes {
-            category {
-              id
-              name
-              slug
-              isAnswerable
-            }
-          }
-          pageInfo {
-            hasNextPage
-            endCursor
+            id
+            name
+            slug
+            isAnswerable
           }
         }
       }
     }
     """
-    cursor = None
-    seen_categories: dict[str, str] = {}
-    while True:
-        data = client.query(gql, {"org": org, "cursor": cursor})
-        discussions_data = (
-            data.get("organization", {}).get("repositoryDiscussions", {})
+    data = client.query(gql, {"owner": source_owner, "repo": source_repo})
+    repo_data = data.get("repository")
+    if repo_data is None:
+        raise RuntimeError(
+            f"无法访问源仓库 {source_owner}/{source_repo}：仓库不存在或 PAT "
+            f"未授权该仓库的 Discussions: Read 权限"
         )
-        nodes = discussions_data.get("nodes", [])
-        page_info = discussions_data.get("pageInfo", {"hasNextPage": False, "endCursor": None})
-        for node in nodes:
-            cat = node.get("category") or {}
-            cat_name = cat.get("name", "").strip()
-            if cat_name and cat.get("id"):
-                seen_categories[cat_name] = cat["id"]
-            if cat_name == QA_CATEGORY_NAME:
-                logger.info(
-                    "找到组织 Q&A category: id=%s slug=%s isAnswerable=%s",
-                    cat["id"],
-                    cat.get("slug"),
-                    cat.get("isAnswerable"),
-                )
-                return cat["id"]
-        if not page_info.get("hasNextPage"):
-            break
-        cursor = page_info.get("endCursor")
-    available = list(seen_categories.keys())
+    nodes = (repo_data.get("discussionCategories") or {}).get("nodes", []) or []
+    for node in nodes:
+        if node.get("name", "").strip() == QA_CATEGORY_NAME:
+            logger.info(
+                "找到组织 Q&A category（源仓库 %s/%s）: id=%s slug=%s isAnswerable=%s",
+                source_owner,
+                source_repo,
+                node["id"],
+                node.get("slug"),
+                node.get("isAnswerable"),
+            )
+            return node["id"]
+    available = [n.get("name") for n in nodes]
     raise RuntimeError(
-        f"未找到组织 {org!r} 中名为 {QA_CATEGORY_NAME!r} 的 Discussion Category，"
-        f"已有分类: {available}"
+        f"未找到源仓库 {source_owner}/{source_repo} 中名为 {QA_CATEGORY_NAME!r} 的 "
+        f"Discussion Category，已有分类: {available}"
     )
 
 
 def fetch_org_discussion(
-    client: GitHubGraphQL, org: str, number: int
+    client: GitHubGraphQL, source_owner: str, source_repo: str, number: int
 ) -> dict[str, Any]:
     """拉取指定组织级 discussion 的详情（含所有评论，自动分页）。
 
-    GitHub GraphQL 的 ``Organization`` 类型没有 ``discussion(number:)`` 字段
-    （discussion 是仓库级实体，必须通过 ``repository(...).discussion(number:)``
-    访问）。这里通过分页扫描 ``Organization.repositoryDiscussions`` 找出
-    编号匹配的 discussion，从而支持 webhook relay 仅传入 discussion number 的场景。
+    通过源仓库 ``repository(...).discussion(number:)`` 直接定位，避免扫描
+    ``Organization.repositoryDiscussions`` 的高 GraphQL cost。
 
     Raises:
         RuntimeError: Discussion 不存在或无权限。
     """
-    gql = """
-    query($org: String!, $cursor: String) {
-      organization(login: $org) {
-        repositoryDiscussions(first: 100, after: $cursor, orderBy: {field: CREATED_AT, direction: DESC}) {
-          nodes {
-            id
-            number
-            title
-            body
-            url
-            closed
-            category {
-              id
-              name
-            }
-            comments(first: 100) {
-              nodes {
-                id
-                body
-                createdAt
-                author { login }
-              }
-              pageInfo {
-                hasNextPage
-                endCursor
-              }
-            }
-          }
-          pageInfo {
-            hasNextPage
-            endCursor
-          }
-        }
-      }
-    }
-    """
-    cursor: Optional[str] = None
-    while True:
-        data = client.query(gql, {"org": org, "cursor": cursor})
-        discussions_data = (
-            data.get("organization", {}).get("repositoryDiscussions", {})
-        )
-        nodes = discussions_data.get("nodes", []) or []
-        page_info = discussions_data.get(
-            "pageInfo", {"hasNextPage": False, "endCursor": None}
-        )
-        for disc in nodes:
-            if disc.get("number") == number:
-                while disc["comments"]["pageInfo"]["hasNextPage"]:
-                    inner_cursor = disc["comments"]["pageInfo"]["endCursor"]
-                    more = _fetch_more_comments(client, disc["id"], inner_cursor)
-                    disc["comments"]["nodes"].extend(more.get("nodes", []))
-                    disc["comments"]["pageInfo"] = more.get(
-                        "pageInfo", {"hasNextPage": False, "endCursor": None}
-                    )
-                return disc
-        if not page_info.get("hasNextPage"):
-            break
-        cursor = page_info.get("endCursor")
-
-    raise RuntimeError(f"组织 Discussion #{number} 不存在或无权限访问")
+    return fetch_discussion(client, source_owner, source_repo, number)
 
 
 def scan_org_qa_discussions(
     client: GitHubGraphQL,
-    org: str,
+    source_owner: str,
+    source_repo: str,
     category_id: str,
     page_size: int = 50,
     max_pages: int = 20,
 ) -> list[dict[str, Any]]:
-    """全量扫描组织 Q&A 分类下的 Discussion（含所有评论，自动分页）。
+    """全量扫描源仓库中 Q&A 分类下的 Discussion（含所有评论，自动分页）。
 
     会跳过 ``closed = True`` 的 discussion，仅返回 open 状态的 discussion。
     通过 ``pageInfo`` 翻页，最多扫描 ``max_pages * page_size`` 条 discussion，
     以避免 PAT 配额异常时陷入死循环。
 
-    GitHub GraphQL 的 ``Organization.repositoryDiscussions`` 字段不支持按
-    ``categoryId`` 过滤，因此这里在客户端按 ``category.id`` 过滤。
+    GitHub GraphQL 的 ``Repository.discussions`` 字段支持 ``categoryId``
+    参数，因此服务端就能完成分类过滤，效率显著高于
+    ``Organization.repositoryDiscussions`` + 客户端过滤。
     """
     gql = """
-    query($org: String!, $pageSize: Int!, $cursor: String) {
-      organization(login: $org) {
-        repositoryDiscussions(
+    query($owner: String!, $repo: String!, $categoryId: ID!, $pageSize: Int!, $cursor: String) {
+      repository(owner: $owner, name: $repo) {
+        discussions(
           first: $pageSize,
           after: $cursor,
+          categoryId: $categoryId,
           orderBy: {field: CREATED_AT, direction: DESC}
         ) {
           nodes {
@@ -608,22 +572,27 @@ def scan_org_qa_discussions(
     for _ in range(max_pages):
         data = client.query(
             gql,
-            {"org": org, "pageSize": page_size, "cursor": cursor},
+            {
+                "owner": source_owner,
+                "repo": source_repo,
+                "categoryId": category_id,
+                "pageSize": page_size,
+                "cursor": cursor,
+            },
         )
-        discussions_data = (
-            data.get("organization", {}).get("repositoryDiscussions", {})
-        )
+        repo_data = data.get("repository")
+        if repo_data is None:
+            raise RuntimeError(
+                f"无法访问源仓库 {source_owner}/{source_repo}：仓库不存在或 PAT "
+                f"未授权该仓库的 Discussions: Read 权限"
+            )
+        discussions_data = repo_data.get("discussions") or {}
         nodes = discussions_data.get("nodes", []) or []
         page_info = discussions_data.get(
             "pageInfo", {"hasNextPage": False, "endCursor": None}
         )
         for disc in nodes:
             if disc.get("closed"):
-                continue
-            # 客户端按 category.id 过滤，因为 repositoryDiscussions 不支持
-            # categoryId 参数。
-            cat = disc.get("category") or {}
-            if cat.get("id") != category_id:
                 continue
             # 拉取该 discussion 的全部评论
             while disc["comments"]["pageInfo"]["hasNextPage"]:
@@ -794,15 +763,18 @@ def run_manual_mode(
 def run_org_discussion_mode(
     client: GitHubGraphQL,
     qa_engine: CSM_QA,
-    org: str,
+    source_owner: str,
+    source_repo: str,
     org_qa_category_id: str,
     discussion_number: int,
     *,
     dry_run: bool = False,
     bot_login: Optional[str] = None,
 ) -> None:
-    """手动模式：直接处理指定组织级 Discussion。"""
-    discussion = fetch_org_discussion(client, org, discussion_number)
+    """手动模式：直接处理指定组织级 Discussion（位于源仓库 source_owner/source_repo）。"""
+    discussion = fetch_org_discussion(
+        client, source_owner, source_repo, discussion_number
+    )
     _process_discussion_dict(
         client, qa_engine, discussion, org_qa_category_id,
         dry_run=dry_run, bot_login=bot_login,
@@ -812,15 +784,18 @@ def run_org_discussion_mode(
 def run_scan_mode(
     client: GitHubGraphQL,
     qa_engine: CSM_QA,
-    org: str,
+    source_owner: str,
+    source_repo: str,
     org_qa_category_id: str,
     *,
     dry_run: bool = False,
     bot_login: Optional[str] = None,
 ) -> None:
-    """全量扫描模式：处理组织 Q&A 分类下所有 open discussion，
+    """全量扫描模式：处理源仓库 Q&A 分类下所有 open discussion，
     自动回复未答复的 discussion 以及 Bot 回复后又出现新追问的 discussion。"""
-    discussions = scan_org_qa_discussions(client, org, org_qa_category_id)
+    discussions = scan_org_qa_discussions(
+        client, source_owner, source_repo, org_qa_category_id
+    )
     logger.info("找到 %d 条 open 状态的组织 Q&A 讨论", len(discussions))
     replied = 0
     for disc in discussions:
@@ -930,11 +905,19 @@ def main(argv: Optional[list[str]] = None) -> int:
                 bot_login=bot_login,
             )
         elif args.org_discussion_number is not None:
-            org_category_id = resolve_org_qa_category_id(client, owner)
+            try:
+                source_owner, source_repo = _get_source_repo_parts()
+            except ValueError as exc:
+                logger.error("%s", exc)
+                return 1
+            org_category_id = resolve_org_qa_category_id(
+                client, source_owner, source_repo
+            )
             run_org_discussion_mode(
                 client,
                 qa_engine,
-                owner,
+                source_owner,
+                source_repo,
                 org_category_id,
                 args.org_discussion_number,
                 dry_run=args.dry_run,
@@ -942,11 +925,19 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
         else:
             # --scan-org
-            org_category_id = resolve_org_qa_category_id(client, owner)
+            try:
+                source_owner, source_repo = _get_source_repo_parts()
+            except ValueError as exc:
+                logger.error("%s", exc)
+                return 1
+            org_category_id = resolve_org_qa_category_id(
+                client, source_owner, source_repo
+            )
             run_scan_mode(
                 client,
                 qa_engine,
-                owner,
+                source_owner,
+                source_repo,
                 org_category_id,
                 dry_run=args.dry_run,
                 bot_login=bot_login,

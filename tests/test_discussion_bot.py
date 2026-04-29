@@ -22,6 +22,7 @@ from scripts.discussion_bot import (
     compute_reply_plan,
     _fetch_more_comments,
     _process_discussion_dict,
+    _get_source_repo_parts,
     get_viewer_login,
     resolve_org_qa_category_id,
     fetch_org_discussion,
@@ -223,78 +224,76 @@ def test_fetch_more_comments_returns_empty_on_missing_node():
 
 
 def test_resolve_org_qa_category_id_found():
-    """能正确返回组织中名为 'Q&A' 的 category ID。"""
+    """能正确返回源仓库中名为 'Q&A' 的 category ID。"""
     data = {
-        "organization": {
-            "repositoryDiscussions": {
+        "repository": {
+            "discussionCategories": {
                 "nodes": [
-                    {"category": {"id": "cat1", "name": "General", "slug": "general", "isAnswerable": False}},
-                    {"category": {"id": "cat2", "name": "Q&A", "slug": "q-a", "isAnswerable": True}},
+                    {"id": "cat1", "name": "General", "slug": "general", "isAnswerable": False},
+                    {"id": "cat2", "name": "Q&A", "slug": "q-a", "isAnswerable": True},
                 ],
-                "pageInfo": {"hasNextPage": False, "endCursor": None},
             }
         }
     }
     client = _MockGraphQL(data)
-    assert resolve_org_qa_category_id(client, "NEVSTOP-LAB") == "cat2"
+    assert resolve_org_qa_category_id(client, "NEVSTOP-LAB", ".github") == "cat2"
 
 
 def test_resolve_org_qa_category_id_not_found():
     """未找到 Q&A category 时应抛出 RuntimeError。"""
     data = {
-        "organization": {
-            "repositoryDiscussions": {
+        "repository": {
+            "discussionCategories": {
                 "nodes": [
-                    {"category": {"id": "cat1", "name": "General", "slug": "general", "isAnswerable": False}},
+                    {"id": "cat1", "name": "General", "slug": "general", "isAnswerable": False},
                 ],
-                "pageInfo": {"hasNextPage": False, "endCursor": None},
             }
         }
     }
     client = _MockGraphQL(data)
     with pytest.raises(RuntimeError, match="Q&A"):
-        resolve_org_qa_category_id(client, "NEVSTOP-LAB")
+        resolve_org_qa_category_id(client, "NEVSTOP-LAB", ".github")
 
 
 def test_resolve_org_qa_category_id_empty():
     """分类列表为空时应抛出 RuntimeError。"""
     data = {
-        "organization": {
-            "repositoryDiscussions": {
-                "nodes": [],
-                "pageInfo": {"hasNextPage": False, "endCursor": None},
-            }
+        "repository": {
+            "discussionCategories": {"nodes": []},
         }
     }
     client = _MockGraphQL(data)
     with pytest.raises(RuntimeError):
-        resolve_org_qa_category_id(client, "NEVSTOP-LAB")
+        resolve_org_qa_category_id(client, "NEVSTOP-LAB", ".github")
+
+
+def test_resolve_org_qa_category_id_repo_inaccessible():
+    """源仓库无权限或不存在时应抛出 RuntimeError 提示授权问题。"""
+    data = {"repository": None}
+    client = _MockGraphQL(data)
+    with pytest.raises(RuntimeError, match="无法访问源仓库"):
+        resolve_org_qa_category_id(client, "NEVSTOP-LAB", ".github")
 
 
 # ── fetch_org_discussion ──────────────────────────────────────────────────────
 
 
 def _make_org_discussion_payload(number: int = 31, comments: list[dict] | None = None) -> dict:
-    """构造 organization.repositoryDiscussions GraphQL 响应 payload（含一条匹配的 discussion）。"""
+    """构造 repository.discussion(number:) GraphQL 响应 payload。"""
     return {
-        "organization": {
-            "repositoryDiscussions": {
-                "nodes": [
-                    {
-                        "id": f"D_org_{number}",
-                        "number": number,
-                        "title": f"Org Discussion #{number}",
-                        "body": "Body text",
-                        "url": f"https://github.com/orgs/NEVSTOP-LAB/discussions/{number}",
-                        "closed": False,
-                        "category": {"id": "cat2", "name": "Q&A"},
-                        "comments": {
-                            "nodes": comments or [],
-                            "pageInfo": {"hasNextPage": False, "endCursor": None},
-                        },
-                    }
-                ],
-                "pageInfo": {"hasNextPage": False, "endCursor": None},
+        "repository": {
+            "discussion": {
+                "id": f"D_org_{number}",
+                "number": number,
+                "title": f"Org Discussion #{number}",
+                "body": "Body text",
+                "url": f"https://github.com/NEVSTOP-LAB/.github/discussions/{number}",
+                "closed": False,
+                "category": {"id": "cat2", "name": "Q&A"},
+                "comments": {
+                    "nodes": comments or [],
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                },
             }
         }
     }
@@ -302,25 +301,16 @@ def _make_org_discussion_payload(number: int = 31, comments: list[dict] | None =
 
 def test_fetch_org_discussion_returns_discussion():
     client = _MockGraphQL(_make_org_discussion_payload(31))
-    disc = fetch_org_discussion(client, "NEVSTOP-LAB", 31)
+    disc = fetch_org_discussion(client, "NEVSTOP-LAB", ".github", 31)
     assert disc["number"] == 31
     assert disc["id"] == "D_org_31"
     assert disc["category"]["name"] == "Q&A"
 
 
 def test_fetch_org_discussion_not_found():
-    client = _MockGraphQL(
-        {
-            "organization": {
-                "repositoryDiscussions": {
-                    "nodes": [],
-                    "pageInfo": {"hasNextPage": False, "endCursor": None},
-                }
-            }
-        }
-    )
+    client = _MockGraphQL({"repository": {"discussion": None}})
     with pytest.raises(RuntimeError, match="31"):
-        fetch_org_discussion(client, "NEVSTOP-LAB", 31)
+        fetch_org_discussion(client, "NEVSTOP-LAB", ".github", 31)
 
 
 # ── scan_org_qa_discussions ───────────────────────────────────────────────────
@@ -329,15 +319,15 @@ def test_fetch_org_discussion_not_found():
 def test_scan_org_qa_discussions_returns_list():
     """scan_org_qa_discussions 应返回 discussion 列表。"""
     data = {
-        "organization": {
-            "repositoryDiscussions": {
+        "repository": {
+            "discussions": {
                 "nodes": [
                     {
                         "id": "D1",
                         "number": 1,
                         "title": "Q1",
                         "body": "body1",
-                        "url": "https://github.com/orgs/NEVSTOP-LAB/discussions/1",
+                        "url": "https://github.com/NEVSTOP-LAB/.github/discussions/1",
                         "closed": False,
                         "category": {"id": "cat2", "name": "Q&A"},
                         "comments": {
@@ -351,16 +341,23 @@ def test_scan_org_qa_discussions_returns_list():
         }
     }
     client = _MockGraphQL(data)
-    discussions = scan_org_qa_discussions(client, "NEVSTOP-LAB", "cat2")
+    discussions = scan_org_qa_discussions(client, "NEVSTOP-LAB", ".github", "cat2")
     assert len(discussions) == 1
     assert discussions[0]["number"] == 1
 
 
 def test_scan_org_qa_discussions_empty():
     """分类下无讨论时应返回空列表。"""
-    data = {"organization": {"repositoryDiscussions": {"nodes": []}}}
+    data = {"repository": {"discussions": {"nodes": []}}}
     client = _MockGraphQL(data)
-    assert scan_org_qa_discussions(client, "NEVSTOP-LAB", "cat2") == []
+    assert scan_org_qa_discussions(client, "NEVSTOP-LAB", ".github", "cat2") == []
+
+
+def test_scan_org_qa_discussions_repo_inaccessible():
+    """源仓库无权限或不存在时应抛出 RuntimeError。"""
+    client = _MockGraphQL({"repository": None})
+    with pytest.raises(RuntimeError, match="无法访问源仓库"):
+        scan_org_qa_discussions(client, "NEVSTOP-LAB", ".github", "cat2")
 
 
 # ── _process_discussion_dict ──────────────────────────────────────────────────
@@ -654,8 +651,8 @@ def test_process_discussion_dict_followup_calls_ask_with_history():
 def test_scan_org_qa_discussions_filters_closed():
     """全量扫描应过滤掉 closed=True 的 discussion。"""
     data = {
-        "organization": {
-            "repositoryDiscussions": {
+        "repository": {
+            "discussions": {
                 "nodes": [
                     {
                         "id": "D1", "number": 1, "title": "open", "body": "",
@@ -681,6 +678,69 @@ def test_scan_org_qa_discussions_filters_closed():
         }
     }
     client = _MockGraphQL(data)
-    discussions = scan_org_qa_discussions(client, "NEVSTOP-LAB", "cat2")
+    discussions = scan_org_qa_discussions(client, "NEVSTOP-LAB", ".github", "cat2")
     assert len(discussions) == 1
     assert discussions[0]["number"] == 1
+
+
+# ── _get_source_repo_parts ────────────────────────────────────────────────────
+
+
+def test_get_source_repo_parts_defaults_to_dot_github(monkeypatch):
+    """未设置 DISCUSSION_SOURCE_REPO 时回退为 <org>/.github。"""
+    monkeypatch.setenv("GITHUB_REPOSITORY", "NEVSTOP-LAB/CSM-QA-Robot")
+    monkeypatch.delenv("DISCUSSION_SOURCE_REPO", raising=False)
+    assert _get_source_repo_parts() == ("NEVSTOP-LAB", ".github")
+
+
+def test_get_source_repo_parts_uses_env_override(monkeypatch):
+    """设置 DISCUSSION_SOURCE_REPO 时优先使用该值。"""
+    monkeypatch.setenv("GITHUB_REPOSITORY", "NEVSTOP-LAB/CSM-QA-Robot")
+    monkeypatch.setenv("DISCUSSION_SOURCE_REPO", "some-org/discuss-host")
+    assert _get_source_repo_parts() == ("some-org", "discuss-host")
+
+
+def test_get_source_repo_parts_empty_env_falls_back(monkeypatch):
+    """DISCUSSION_SOURCE_REPO 为空字符串时也走默认逻辑。"""
+    monkeypatch.setenv("GITHUB_REPOSITORY", "NEVSTOP-LAB/CSM-QA-Robot")
+    monkeypatch.setenv("DISCUSSION_SOURCE_REPO", "   ")
+    assert _get_source_repo_parts() == ("NEVSTOP-LAB", ".github")
+
+
+def test_get_source_repo_parts_invalid_env_raises(monkeypatch):
+    """DISCUSSION_SOURCE_REPO 缺少 / 时应抛出 ValueError。"""
+    monkeypatch.setenv("GITHUB_REPOSITORY", "NEVSTOP-LAB/CSM-QA-Robot")
+    monkeypatch.setenv("DISCUSSION_SOURCE_REPO", "no-slash")
+    with pytest.raises(ValueError, match="DISCUSSION_SOURCE_REPO"):
+        _get_source_repo_parts()
+
+
+def test_get_source_repo_parts_empty_owner_raises(monkeypatch):
+    """DISCUSSION_SOURCE_REPO 中 owner 段为空时应抛出 ValueError。"""
+    monkeypatch.setenv("GITHUB_REPOSITORY", "NEVSTOP-LAB/CSM-QA-Robot")
+    monkeypatch.setenv("DISCUSSION_SOURCE_REPO", "/repo")
+    with pytest.raises(ValueError, match="DISCUSSION_SOURCE_REPO"):
+        _get_source_repo_parts()
+
+
+def test_get_source_repo_parts_empty_repo_raises(monkeypatch):
+    """DISCUSSION_SOURCE_REPO 中 repo 段为空时应抛出 ValueError。"""
+    monkeypatch.setenv("GITHUB_REPOSITORY", "NEVSTOP-LAB/CSM-QA-Robot")
+    monkeypatch.setenv("DISCUSSION_SOURCE_REPO", "owner/")
+    with pytest.raises(ValueError, match="DISCUSSION_SOURCE_REPO"):
+        _get_source_repo_parts()
+
+
+def test_get_source_repo_parts_strips_whitespace(monkeypatch):
+    """DISCUSSION_SOURCE_REPO 各段两侧空格应被 strip。"""
+    monkeypatch.setenv("GITHUB_REPOSITORY", "NEVSTOP-LAB/CSM-QA-Robot")
+    monkeypatch.setenv("DISCUSSION_SOURCE_REPO", "  some-org / discuss-host  ")
+    assert _get_source_repo_parts() == ("some-org", "discuss-host")
+
+
+def test_get_source_repo_parts_whitespace_only_segment_raises(monkeypatch):
+    """DISCUSSION_SOURCE_REPO 中仅含空格的段也应抛出 ValueError。"""
+    monkeypatch.setenv("GITHUB_REPOSITORY", "NEVSTOP-LAB/CSM-QA-Robot")
+    monkeypatch.setenv("DISCUSSION_SOURCE_REPO", "owner/   ")
+    with pytest.raises(ValueError, match="DISCUSSION_SOURCE_REPO"):
+        _get_source_repo_parts()
