@@ -296,12 +296,18 @@ def has_bot_replied(discussion: dict, bot_login: Optional[str] = None) -> bool:
 
 
 def _is_bot_comment(comment: dict, bot_login: Optional[str]) -> bool:
-    """判断单条评论是否为 Bot 自动生成（含 BOT_MARKER；若提供 bot_login 则同时校验作者）。"""
+    """判断单条评论是否为 Bot 自动生成。
+
+    严格 fail-closed：必须同时满足"含 BOT_MARKER"且"作者 == bot_login"才认定为 Bot。
+    若调用方未提供 ``bot_login``（如 viewer 查询失败），则一律返回 ``False``，
+    避免普通用户在评论中粘贴 marker 就能伪装为 assistant 注入到对话历史 / 干扰
+    follow-up 判定。``has_bot_replied`` 仍保留宽松匹配以防止重复回复。
+    """
     body = comment.get("body") or ""
     if BOT_MARKER not in body:
         return False
     if bot_login is None:
-        return True
+        return False
     author = (comment.get("author") or {}).get("login", "")
     return author == bot_login
 
@@ -328,6 +334,15 @@ def compute_reply_plan(
     original_question = f"{title}\n\n{body}".strip() if body else title
 
     comments = discussion.get("comments", {}).get("nodes", []) or []
+
+    # 安全保护：若 bot_login 未知（viewer 查询失败），无法可靠区分 Bot 真实回复
+    # 与用户伪造的 marker，故只要任意评论含 BOT_MARKER 就跳过整个 discussion，
+    # 既避免重复回复（marker 可能确实来自之前真实 Bot），也防止伪造内容被注入
+    # 到 follow-up 的 history 中。
+    if bot_login is None:
+        if any(BOT_MARKER in (c.get("body") or "") for c in comments):
+            return None
+        return original_question, []
 
     # 找到最后一条 Bot 回复的索引
     last_bot_idx = -1

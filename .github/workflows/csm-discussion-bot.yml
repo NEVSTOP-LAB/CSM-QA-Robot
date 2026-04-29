@@ -82,12 +82,19 @@ jobs:
           REPO_URL=$(python -c "import json; print(json.load(open('$SOURCE_FILE'))['url'])")
           # 形如 https://github.com/NEVSTOP-LAB/CSM-Wiki(.git)? → owner/repo
           SLUG=$(echo "$REPO_URL" | sed -E 's#^https?://github\.com/([^/]+/[^/]+?)(\.git)?/?$#\1#')
-          API_URL="https://api.github.com/repos/${SLUG}/commits/main"
+          # 不要硬编码分支名：先查询仓库 default_branch，与
+          # csm_qa/wiki_updater.fetch_latest_commit_id 的 main→master 兜底保持一致
+          REPO_API_URL="https://api.github.com/repos/${SLUG}"
+          DEFAULT_BRANCH=$(curl -fsSL \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            "$REPO_API_URL" | python -c "import sys,json; print(json.load(sys.stdin)['default_branch'])")
+          API_URL="https://api.github.com/repos/${SLUG}/commits/${DEFAULT_BRANCH}"
           SHA=$(curl -fsSL \
             -H "Accept: application/vnd.github.v3+json" \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             "$API_URL" | python -c "import sys,json; print(json.load(sys.stdin)['sha'])")
-          echo "csm-wiki ($SLUG) HEAD: $SHA"
+          echo "csm-wiki ($SLUG) default branch: $DEFAULT_BRANCH, HEAD: $SHA"
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
 
       - name: Cache vector store
